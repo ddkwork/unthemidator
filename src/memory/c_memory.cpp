@@ -64,6 +64,7 @@ c_memory::c_memory(const std::shared_ptr<c_pe_image>& pe_image) : m_pe_image(pe_
     data.product_type_is_valid = 1;
     data.native_processor_architecture = 9; // AMD64, also for WOW64 guests.
     data.nt_major_version = 10;
+
     // Features exposed by the emulator's CPUID leaf 1, plus OS facilities.
     for (const auto feature : { 2, 3, 6, 8, 9, 10, 11, 12, 13, 14, 15, 17, 23, 28, 36, 37, 38, 39 }) {
         data.processor_features[feature] = 1;
@@ -190,9 +191,12 @@ bool c_memory::read_executable_byte(const uint64_t address, uint8_t *byte) const
         return true;
     }
 
-    if (address >= m_commited_memory_start && address < m_cursor) {
-        *byte = m_commited_memory.at(address - m_commited_memory_start);
-        return true;
+    if (auto region = m_allocated_regions.upper_bound(address); region != m_allocated_regions.begin()) {
+        --region;
+        if (address - region->first < region->second.size()) {
+            *byte = region->second.at(address - region->first);
+            return true;
+        }
     }
 
     return false;

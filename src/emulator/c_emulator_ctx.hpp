@@ -39,6 +39,19 @@ public:
     [[nodiscard]] std::shared_ptr<c_imports> get_imports() const;
     [[nodiscard]] const std::vector<uint8_t>& get_original_file_mapping() const;
 
+    struct s_file_handle {
+        const std::vector<uint8_t> *m_data = nullptr;
+        uint64_t m_size = 0;
+        uint32_t m_protection = 0;
+        bool m_is_mapping = false;
+    };
+
+    void set_file_sources(const std::string &input_name, const std::string &license_name, std::vector<uint8_t> license);
+    uint64_t open_file(const std::string &path) const;
+    uint64_t create_file_mapping(uint64_t handle, uint64_t size, uint32_t protection) const;
+    const s_file_handle* get_file_handle(uint64_t handle, bool mapping) const;
+    bool close_file_handle(uint64_t handle) const;
+
     void set_themida_unpacker(c_themida_unpacker* unpacker);
     [[nodiscard]] c_themida_unpacker* get_themida_unpacker() const;
 
@@ -104,8 +117,10 @@ public:
     }
 
     void single_step(std::function<mem_callback_t> on_mem = nullptr) const;
+
     void stop(uint64_t address) const;
     [[nodiscard]] bool is_stopped() const { return m_stop_requested; }
+
     void run(uint64_t start, uint64_t end = 0, std::function<code_callback_t> on_code = nullptr,
         std::function<mem_callback_t> on_mem = nullptr) const;
 
@@ -113,9 +128,27 @@ public:
     void set_pc(uint64_t new_pc) const;
 
     [[nodiscard]] uint64_t allocate_storage(uint32_t size, const std::string &tag = {}) const;
+    [[nodiscard]] uint64_t allocate_heap(uint64_t size) const;
+    [[nodiscard]] uint64_t reallocate_heap(uint64_t address, uint64_t size, uint32_t flags) const;
+
+    bool free_storage(uint64_t address) const;
+    bool free_heap(uint64_t address) const;
+    [[nodiscard]] uint64_t allocate_virtual(uint64_t address, uint64_t size, uint32_t type) const;
+    bool free_virtual(uint64_t address, uint64_t size, uint32_t type) const;
 
     void initialize_windows_ldr() const;
 private:
+    struct s_heap_allocation {
+        uint32_t m_size;
+        uint32_t m_capacity;
+    };
+    mutable std::unordered_map<uint64_t, s_heap_allocation> m_heap_allocations{};
+    mutable std::unordered_set<uint64_t> m_storage_allocations{};
+
+    struct s_virtual_allocation {
+        std::vector<bool> m_committed_pages;
+    };
+    mutable std::map<uint64_t, s_virtual_allocation> m_virtual_allocations{};
     static bool fetch_prot_callback(uc_engine *uc, uc_mem_type type, uint64_t address, int size, int64_t value, c_emulator_ctx* ctx);
     uc_err emulate(uint64_t start, uint64_t end, size_t count) const;
 
@@ -137,7 +170,10 @@ private:
     std::unordered_set<uint64_t> m_exception_handlers{};
 
     mutable std::unordered_map<uint64_t, s_process_snapshot> m_process_snapshots{};
-    mutable uint64_t m_next_snapshot_handle = 0x10000;
+    mutable uint64_t m_next_handle = 0x10000;
+    std::unordered_map<std::string, const std::vector<uint8_t>*> m_file_sources{};
+    std::vector<uint8_t> m_license_file{};
+    mutable std::unordered_map<uint64_t, s_file_handle> m_file_handles{};
 
     uint64_t m_exception_stack = 0;
     uint64_t m_exception_return_address = 0;

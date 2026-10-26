@@ -1,6 +1,7 @@
 #include "c_memory_manager.hpp"
 
 #include <stdexcept>
+#include <algorithm>
 
 #include "../pe/c_pe_image.hpp"
 
@@ -9,24 +10,57 @@ c_memory_manager::c_memory_manager(const std::shared_ptr<c_pe_image>& pe_image) 
 }
 
 uint64_t c_memory_manager::allocate_helper_stub(const uint32_t size) {
-    // allocate stub on top of the existing dump
-    auto stub_address = m_cursor;
+    const auto aligned_size = page_up(size ? size : 1, 0x1000);
+    auto address = m_commited_memory_start;
 
-    auto next_cursor = page_up(stub_address + size + 0x100, 0x1000);
-    if (overlaps_shared_data(stub_address, next_cursor - stub_address)) {
-        stub_address = k_shared_data_base + k_shared_data_size;
-        next_cursor = page_up(stub_address + size + 0x100, 0x1000);
+    for (const auto &[base, region] : m_allocated_regions) {
+        if (overlaps_shared_data(address, aligned_size)) {
+            address = k_shared_data_base + k_shared_data_size;
+        }
+
+        if (address <= base && aligned_size <= base - address) {
+            break;
+        }
+
+        address = std::max(address, base + region.size());
     }
 
-    if (!m_pe_image->is_x64() && next_cursor > UINT32_MAX) {
-        throw std::runtime_error("memory: x86 allocation exceeds 32-bit address space");
+    if (overlaps_shared_data(address, aligned_size)) {
+        address = k_shared_data_base + k_shared_data_size;
     }
 
-    // Keep address-based offsets intact across the reserved hole.
-    m_commited_memory.resize(next_cursor - m_commited_memory_start, 0);
-    m_cursor = next_cursor;
+    if (address > UINT64_MAX - aligned_size ||
+        (!m_pe_image->is_x64() && address + aligned_size > 0x100000000ULL)) {
+        throw std::runtime_error("memory: allocation exceeds address space");
+    }
 
-    return stub_address;
+    m_allocated_regions.emplace(address, std::vector<uint8_t>(aligned_size, 0));
+    m_cursor = std::max(m_cursor, address + aligned_size);
+    return address;
+}
+
+uint64_t c_memory_manager::get_region_size(const uint64_t address) const {
+    const auto it = m_allocated_regions.find(address);
+    return it == m_allocated_regions.end() ? 0 : it->second.size();
+}
+
+bool c_memory_manager::free_region(const uint64_t address) {
+    const auto size = get_region_size(address);
+    if (!size) {
+        return false;
+    }
+
+    m_allocated_regions.erase(address);
+    std::erase_if(m_tagged_regions, [&](const auto &entry) {
+        return entry.first >= address && entry.first - address < size;
+    });
+    std::erase_if(m_const_regions, [&](const auto &region) {
+        return region.first < address + size && region.second > address;
+    });
+
+    m_cursor = m_allocated_regions.empty() ? m_commited_memory_start :
+        m_allocated_regions.rbegin()->first + m_allocated_regions.rbegin()->second.size();
+    return true;
 }
 
 void c_memory_manager::write_memory(const uint64_t address, const std::vector<uint8_t> &dump) {
@@ -34,7 +68,7 @@ void c_memory_manager::write_memory(const uint64_t address, const std::vector<ui
         throw std::runtime_error("memory: KUSER_SHARED_DATA is read-only");
     }
 
-    if (address + dump.size() > m_cursor) {
+    if (address > m_cursor || dump.size() > m_cursor - address) {
         throw std::runtime_error("memory: attempted out of range write");
     }
 
@@ -47,9 +81,14 @@ void c_memory_manager::write_memory(const uint64_t address, const std::vector<ui
         return;
     }
 
-    if (address >= m_commited_memory_start) {
-        memcpy(m_commited_memory.data() + address - m_commited_memory_start, dump.data(), dump.size());
-        return;
+    auto region = m_allocated_regions.upper_bound(address);
+    if (region != m_allocated_regions.begin()) {
+        --region;
+        const auto offset = address - region->first;
+        if (offset <= region->second.size() && dump.size() <= region->second.size() - offset) {
+            memcpy(region->second.data() + offset, dump.data(), dump.size());
+            return;
+        }
     }
 
     throw std::runtime_error("memory: attempted out of range write (2)");

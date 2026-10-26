@@ -2,6 +2,7 @@
 #define UNTHEMIDATOR_BIN_LAYOUT_HPP
 
 #include <unordered_map>
+#include <map>
 #include <vector>
 #include <optional>
 #include <memory>
@@ -72,7 +73,7 @@ protected:
     uint64_t m_cursor = 0;
 
     std::vector<uint8_t> m_mapped_image{};
-    std::vector<uint8_t> m_commited_memory{};
+    std::map<uint64_t, std::vector<uint8_t>> m_allocated_regions{};
 
     std::shared_ptr<c_pe_image> m_pe_image{};
 
