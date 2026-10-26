@@ -18,14 +18,17 @@ int main(int argc, char *argv[]) {
         std::string m_output_path;
         std::string m_imports_path;
         std::string m_vms_path;
+        std::string m_license_path;
         bool m_skip_startup = false;
     } options{};
 
     std::string input_path;
+    std::vector<uint8_t> license_file{};
 
     try {
         bool positional_only = false;
         bool has_input = false;
+
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
 
@@ -34,6 +37,7 @@ int main(int argc, char *argv[]) {
                     "  --out-file <path>      Output PE (default: <name>.unpacked.<extension>)\n"
                     "  --imports-file <path> Imports JSON (default: <name>.imports.json)\n"
                     "  --vms-file <path>     VM entries JSON (default: <name>.vms.json)\n"
+                    "  --license-file <path> WinLicense protected application's license file (usually .dat)\n"
                     "  --vm-depth <0..65535> Virtualization layers to explore (default: 0)\n"
                     "  --no-imp             Skip imports lookup\n"
                     "  --no-startup         Only unpack the initial boot stage\n"
@@ -48,7 +52,7 @@ int main(int argc, char *argv[]) {
             }
 
             if (!positional_only && (arg == "--out-file" || arg == "--imports-file" || arg == "--vms-file" ||
-                arg == "--vm-depth")) {
+                arg == "--vm-depth" || arg == "--license-file")) {
                 if (++i == argc || !argv[i][0] || std::string_view(argv[i]).starts_with("--")) {
                     throw std::runtime_error("missing value for " + arg);
                 }
@@ -61,11 +65,14 @@ int main(int argc, char *argv[]) {
                     options.m_imports_path = value;
                 } else if (arg == "--vms-file") {
                     options.m_vms_path = value;
+                } else if (arg == "--license-file") {
+                    options.m_license_path = value;
                 } else {
                     uint16_t depth = 0;
-                    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), depth);
 
-                    if (error != std::errc{} || end != value.data() + value.size()) {
+                    if (const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), depth);
+                        error != std::errc{} || end != value.data() + value.size()) {
+                        //
                         throw std::runtime_error("--vm-depth must be an integer from 0 to 65535");
                     }
 
@@ -110,14 +117,44 @@ int main(int argc, char *argv[]) {
             options.m_vms_path = stem.string() + ".vms.json";
         }
 
-        const std::filesystem::path paths[] = { input, options.m_output_path, options.m_imports_path, options.m_vms_path };
-        for (size_t i = 0; i < std::size(paths); ++i) {
+        std::vector<std::filesystem::path> paths{
+            input,
+            options.m_output_path,
+            options.m_imports_path,
+            options.m_vms_path,
+        };
+
+        if (!options.m_license_path.empty()) {
+            paths.emplace_back(options.m_license_path);
+        }
+
+        for (size_t i = 0; i < paths.size(); ++i) {
             for (size_t j = 0; j < i; ++j) {
                 if (std::filesystem::weakly_canonical(paths[i]) == std::filesystem::weakly_canonical(paths[j]) ||
                     (std::filesystem::exists(paths[i]) && std::filesystem::exists(paths[j]) &&
                     std::filesystem::equivalent(paths[i], paths[j]))) {
-                    throw std::runtime_error("input and output paths must be distinct");
+                    throw std::runtime_error("input, license and output paths must be distinct");
                 }
+            }
+        }
+
+        if (!options.m_license_path.empty()) {
+            if (!std::filesystem::is_regular_file(options.m_license_path)) {
+                throw std::runtime_error("license file is not a regular file: " + options.m_license_path);
+            }
+
+            std::ifstream license(options.m_license_path, std::ios::binary | std::ios::ate);
+            const auto size = license.tellg();
+
+            if (!license || size < 0 || static_cast<uint64_t>(size) > UINT32_MAX - 0xFFF) {
+                throw std::runtime_error("failed to read license file: " + options.m_license_path);
+            }
+
+            license_file.resize(size);
+            license.seekg(0);
+
+            if (!license_file.empty() && !license.read(reinterpret_cast<char*>(license_file.data()), size)) {
+                throw std::runtime_error("failed to read license file: " + options.m_license_path);
             }
         }
     } catch (const std::exception &e) {
@@ -175,6 +212,7 @@ int main(int argc, char *argv[]) {
             memory_manager);
 
         emulator_ctx = emulator->create_context();
+        emulator_ctx->set_file_sources(input_path, options.m_license_path, std::move(license_file));
 
         // preload modules APIs of which we hook
         emulator_ctx->get_imports()->load_module("ntdll.dll");
@@ -195,9 +233,15 @@ int main(int argc, char *argv[]) {
                     { "LoadLibraryW", { hooks::get_module_handle, 1 } },
                     { "GetProcAddress", { hooks::get_proc_address, 2 } },
                     { "GetCommandLineA", { hooks::get_command_line_a, 0 } },
+                    { "GetCommandLineW", { hooks::get_command_line_w, 0 } },
                     { "GetVersion", { hooks::get_version, 0 } },
                     { "VirtualAlloc", { hooks::virtual_alloc, 4 } },
                     { "GetCurrentDirectoryW", { hooks::get_current_dir, 2 } },
+                    { "MultiByteToWideChar", { hooks::dummy_function, 6 } },
+                    { "WideCharToMultiByte", { hooks::dummy_function, 8 } },
+                    { "GetVolumeInformationA", { hooks::get_volume_information_a, 8 } },
+                    { "GetLocalTime", { hooks::get_local_time, 1 } },
+                    { "SystemTimeToFileTime", { hooks::system_time_to_file_time, 2 } },
                     { "GetModuleFileNameW", { hooks::get_module_filename, 3 } },
                     { "VirtualProtect", { hooks::virtual_protect, 4 } },
                     { "RaiseException", { hooks::raise_exception, 4 } },
@@ -209,8 +253,9 @@ int main(int argc, char *argv[]) {
                     { "LocalAlloc", { hooks::local_alloc, 2 } },
                     { "CreateThread", { hooks::create_thread, 6 } },
 
-                    { "CreateFileW", { hooks::dummy_true_function, 7 } },
-                    { "CreateFileMappingW", { hooks::dummy_true_function, 6 } },
+                    { "CreateFileW", { hooks::create_file_w, 7 } },
+                    { "CreateFileMappingW", { hooks::create_file_mapping, 6 } },
+                    { "CreateFileMappingA", { hooks::create_file_mapping, 6 } },
                     { "UnmapViewOfFile", { hooks::dummy_true_function, 1 } },
                     { "GetUserDefaultUILanguage", { hooks::dummy_function, 0 } },
                     { "GetThreadContext", { hooks::get_thread_context, 2 } },
@@ -227,7 +272,7 @@ int main(int argc, char *argv[]) {
                     { "SetLastError", { hooks::set_last_error, 1 } },
                     { "GetCurrentThread", { hooks::dummy_true_function, 0 } },
                     { "OpenThread", { hooks::dummy_true_function, 3 } },
-                    { "VirtualFree", { hooks::dummy_true_function, 3 } },
+                    { "VirtualFree", { hooks::virtual_free, 3 } },
                     { "CreateToolhelp32Snapshot", { hooks::create_toolhelp_snapshot, 2 } },
                     { "Process32First", { hooks::process_first, 2 } },
                     { "Process32FirstW", { hooks::process_first_w, 2 } },
@@ -238,12 +283,21 @@ int main(int argc, char *argv[]) {
                     { "SetEnvironmentVariableA", { hooks::dummy_function, 2 } },
                     { "SetEnvironmentVariableW", { hooks::dummy_function, 2 } },
                     { "Sleep", { hooks::dummy_function, 0 } },
+                    { "FreeLibrary", { hooks::dummy_function, 1 } },
+                    { "CreateFileA", { hooks::create_file_a, 7 } },
+                    { "DeviceIoControl", { hooks::dummy_function, 8 } },
+                    { "GetEnvironmentVariableA", { hooks::dummy_function, 3 } },
+                    { "GetEnvironmentVariableW", { hooks::dummy_function, 3 } },
+                    { "WriteFile", { hooks::dummy_true_function, 5 } },
+                    { "DeleteFileA", { hooks::dummy_true_function, 1 } },
+                    { "DeleteFileW", { hooks::dummy_true_function, 1 } },
                 }
             },
             {
                 "ntdll.dll",
                 {
                     { "RtlAllocateHeap", { hooks::rtl_allocate_heap, 3 } },
+                    { "RtlReAllocateHeap", { hooks::rtl_reallocate_heap, 4 } },
                     { "RtlAddVectoredExceptionHandler", { hooks::add_veh, 2 } },
                     { "RtlRemoveVectoredExceptionHandler", { hooks::remove_veh, 1 } },
                     { "ZwQueryInformationProcess", { hooks::nt_query_information_process, 5 } },
@@ -254,13 +308,13 @@ int main(int argc, char *argv[]) {
                     { "NtProtectVirtualMemory", { hooks::nt_protect_virtual_memory, 5 } },
                     { "NtQueryObject", { hooks::nt_query_object, 5 } },
                     { "ZwQueryObject", { hooks::nt_query_object, 5 } },
-                    { "NtMapViewOfSection", { hooks::nt_map_view_of_section, 10 } },
-                    { "ZwMapViewOfSection", { hooks::nt_map_view_of_section, 10 } },
+                    { "NtMapViewOfSection", { hooks::dummy_true_function, 10 } },
+                    { "ZwMapViewOfSection", { hooks::dummy_true_function, 10 } },
 
                     { "RtlInitializeCriticalSection", { hooks::dummy_function, 1 } },
                     { "ZwSetInformationThread", { hooks::dummy_function, 4 } },
                     { "NtSetInformationThread", { hooks::dummy_function, 4 } },
-                    { "RtlFreeHeap", { hooks::dummy_true_function, 3 } },
+                    { "RtlFreeHeap", { hooks::rtl_free_heap, 3 } },
                     { "ZwFlushInstructionCache", { hooks::dummy_function, 3 } },
                     { "NtFlushInstructionCache", { hooks::dummy_function, 3 } },
                     { "NtOpenSection", { hooks::dummy_function, 3 } },
@@ -278,6 +332,8 @@ int main(int argc, char *argv[]) {
                     { "FindWindowA", { hooks::dummy_function, 2 } },
                     { "GetWindowTextA", { hooks::dummy_function, 3 } },
                     { "GetForegroundWindow", { hooks::dummy_true_function, 0 } },
+                    { "wsprintfA", { hooks::dummy_function, 2 } },
+                    { "wsprintfW", { hooks::dummy_function, 2 } },
                 }
             },
             {
@@ -286,6 +342,11 @@ int main(int argc, char *argv[]) {
                     { "GetTokenInformation", { hooks::get_token_information, 5 } },
                     { "OpenThreadToken", { hooks::dummy_true_function, 4 } },
                     { "RegOpenKeyA", { hooks::dummy_true_function, 3 } },
+                    { "RegOpenKeyW", { hooks::dummy_true_function, 3 } },
+                    { "RegCreateKeyExA", { hooks::dummy_true_function, 9 } },
+                    { "RegCreateKeyExW", { hooks::dummy_true_function, 9 } },
+                    { "RegSetValueExA", { hooks::dummy_true_function, 6 } },
+                    { "RegSetValueExW", { hooks::dummy_true_function, 6 } },
                     { "RegQueryValueExA", { hooks::dummy_true_function, 6 } },
                     { "RegCloseKey", { hooks::dummy_function, 1 } },
                     { "AllocateAndInitializeSid", { hooks::dummy_true_function, 11 } },
@@ -297,9 +358,23 @@ int main(int argc, char *argv[]) {
                 }
             },
             {
+                "iphlpapi.dll",
+                {
+                    { "GetAdaptersInfo", { hooks::get_adapters_info, 2 } },
+                }
+            },
+            {
                 "shell32.dll",
                 {
-                    { "IsUserAnAdmin", { hooks::dummy_function, 0 } }
+                    { "SHGetSpecialFolderPathW", { hooks::sh_get_special_folder_path_w, 4 } },
+                    { "IsUserAnAdmin", { hooks::dummy_function, 0 } },
+                    { "SHGetSpecialFolderPathW", { hooks::dummy_function, 4 } },
+                }
+            },
+            {
+                "Iphlpapi.dll",
+                {
+                    { "GetAdaptersInfo", { hooks::dummy_true_function, 2 } },
                 }
             }
         };

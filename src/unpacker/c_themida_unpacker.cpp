@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <iostream>
 #include <chrono>
-#include <fstream>
 #include <ranges>
 
 #include "../emulator/hooks.hpp"

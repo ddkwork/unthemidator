@@ -74,7 +74,7 @@ static int cpuid_callback(uc_engine *uc, void*) {
         }
 
         default:
-            // leaf not implemented — return zeros
+            // leaf not implemented РІР‚вЂќ return zeros
             break;
     }
 
@@ -106,10 +106,15 @@ static bool dispatch_hook(uc_engine *uc, const uint64_t address, c_emulator_ctx*
         throw std::runtime_error("unexpected bp!");
     }
 
-    //printf("[+] calling %s from 0x%llX, ret addr 0x%llX...\n", hook->m_name.c_str(), address, ret_addr);
+    /*
+    if (hook->m_name != "GetProcessHeap" && hook->m_name != "RtlFreeHeap" && hook->m_name != "RtlAllocateHeap" &&
+        hook->m_name != "RtlReAllocateHeap") {
+        printf("[+] calling %s from 0x%llX, ret addr 0x%llX...\n", hook->m_name.c_str(), address, ret_addr);
+    }*/
 
     const auto arg_count = hook->m_arg_count;
-    // Both INT3 and protected-fetch hooks see the actual hooked address.
+
+    // both INT3 and protected-fetch hooks see the actual hooked address.
     ctx->set_pc(address);
     hook->m_function(ctx);
 
@@ -223,6 +228,74 @@ c_themida_unpacker * c_emulator_ctx::get_themida_unpacker() const {
 
 const std::vector<uint8_t>& c_emulator_ctx::get_original_file_mapping() const {
     return m_memory_manager->get_pe_image()->get_original_mapping();
+}
+
+namespace {
+    std::string file_name(std::string path) {
+        if (const auto separator = path.find_last_of("/\\"); separator != std::string::npos) {
+            path.erase(0, separator + 1);
+        }
+
+        for (auto &character : path) {
+            if (character >= 'A' && character <= 'Z') {
+                character += 'a' - 'A';
+            }
+        }
+
+        return path;
+    }
+}
+
+void c_emulator_ctx::set_file_sources(const std::string &input_name, const std::string &license_name,
+    std::vector<uint8_t> license) {
+    if (!m_file_handles.empty()) {
+        throw std::runtime_error("emulator ctx: file sources are already in use");
+    }
+
+    const auto input = file_name(input_name);
+    const auto license_file = file_name(license_name);
+    if (input.empty() || (!license_name.empty() && (license_file.empty() || license_file == input))) {
+        throw std::runtime_error("emulator ctx: input and license filenames must be distinct");
+    }
+
+    m_file_sources.clear();
+    m_license_file = std::move(license);
+    m_file_sources.emplace(input, &get_original_file_mapping());
+    if (!license_name.empty()) {
+        m_file_sources.emplace(license_file, &m_license_file);
+    }
+}
+
+uint64_t c_emulator_ctx::open_file(const std::string &path) const {
+    const auto file = m_file_sources.find(file_name(path));
+    if (file == m_file_sources.end()) {
+        return 0;
+    }
+
+    const auto handle = m_next_handle++;
+    m_file_handles.emplace(handle, s_file_handle{file->second, file->second->size(), 0, false});
+    return handle;
+}
+
+const c_emulator_ctx::s_file_handle* c_emulator_ctx::get_file_handle(const uint64_t handle, const bool mapping) const {
+    const auto file = m_file_handles.find(handle);
+    return file == m_file_handles.end() || file->second.m_is_mapping != mapping ? nullptr : &file->second;
+}
+
+uint64_t c_emulator_ctx::create_file_mapping(const uint64_t handle, const uint64_t size, const uint32_t protection) const {
+    const auto file = get_file_handle(handle, false);
+    if (!file || !file->m_size || size > file->m_size) {
+        return 0;
+    }
+
+    const s_file_handle mapping{file->m_data, size ? size : file->m_size, protection, true};
+    const auto mapping_handle = m_next_handle++;
+    m_file_handles.emplace(mapping_handle, mapping);
+    return mapping_handle;
+}
+
+bool c_emulator_ctx::close_file_handle(const uint64_t handle) const {
+    return m_file_handles.erase(handle) != 0;
 }
 
 void c_emulator_ctx::set_themida_unpacker(c_themida_unpacker *unpacker) {
@@ -564,7 +637,7 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
         m_hook_resume = hook_resume;
 
         uc_context_restore(m_uc, saved);
-        uc_mem_unmap(m_uc, stack, k_stack_size);
+        free_storage(stack);
 
         throw;
     }
@@ -574,7 +647,7 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
     m_hook_resume = m_stop_requested ? std::nullopt : hook_resume;
 
     const auto err = uc_context_restore(m_uc, saved);
-    uc_mem_unmap(m_uc, stack, k_stack_size);
+    free_storage(stack);
 
     if (err != UC_ERR_OK) {
         throw std::runtime_error("failed to restore original context");
@@ -586,7 +659,7 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
 }
 
 uint64_t c_emulator_ctx::create_process_snapshot(const uint32_t flags, const uint32_t process_id) const {
-    const auto handle = m_next_snapshot_handle++;
+    const auto handle = m_next_handle++;
 
     m_process_snapshots.emplace(handle, s_process_snapshot{
         .m_flags = flags,
@@ -736,12 +809,11 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
     err = emulate(start, end, 0);
 
     if (err != UC_ERR_OK /*&& err != UC_ERR_FETCH_PROT*/) {
-        /*
         printf("failed at 0x%llX , rsi - 0x%llX , rdi - 0x%llX , rax - 0x%llX , rbx - 0x%llX , r10 - 0x%llX, rbp - 0x%llX, r15 - 0x%llX, rcx - 0x%llX, r12 - 0x%llX\n",
             get_pc(),
             get_x86_reg_value(UC_X86_REG_RSI), get_x86_reg_value(UC_X86_REG_RDI), get_x86_reg_value(UC_X86_REG_RAX),
             get_x86_reg_value(UC_X86_REG_RBX), get_x86_reg_value(UC_X86_REG_R10), get_x86_reg_value(UC_X86_REG_RBP),
-            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12)); */
+            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));
         throw std::runtime_error("emulation error: " + std::to_string(err));
     }
 
@@ -791,17 +863,82 @@ void c_emulator_ctx::set_pc(const uint64_t new_pc) const {
     }
 }
 
+uint64_t c_emulator_ctx::allocate_heap(const uint64_t size) const {
+    if (size > 0xFFFFF000ULL) {
+        return 0;
+    }
+
+    const auto capacity = static_cast<uint32_t>(page_up(size ? size : 1, 0x1000));
+    const auto address = allocate_storage(capacity, "heap");
+    m_heap_allocations.emplace(address, s_heap_allocation{static_cast<uint32_t>(size), capacity});
+    return address;
+}
+
+bool c_emulator_ctx::free_heap(const uint64_t address) const {
+    if (!address) {
+        return true;
+    }
+
+    if (!m_heap_allocations.contains(address) || !free_storage(address)) {
+        return false;
+    }
+
+    m_heap_allocations.erase(address);
+    return true;
+}
+
+uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t size, const uint32_t flags) const {
+    const auto entry = m_heap_allocations.find(address);
+    if (entry == m_heap_allocations.end() || size > 0xFFFFF000ULL) {
+        return 0;
+    }
+
+    const auto old = entry->second;
+    if (size <= old.m_capacity) {
+        if ((flags & 0x8) && size > old.m_size) {
+            const std::vector<uint8_t> zeros(static_cast<size_t>(size - old.m_size), 0);
+            if (uc_mem_write(m_uc, address + old.m_size, zeros.data(), zeros.size()) != UC_ERR_OK) {
+                return 0;
+            }
+        }
+
+        entry->second.m_size = static_cast<uint32_t>(size);
+        return address;
+    }
+
+    if (flags & 0x10) {
+        return 0;
+    }
+
+    std::vector<uint8_t> contents(old.m_size);
+    if (!contents.empty() && uc_mem_read(m_uc, address, contents.data(), contents.size()) != UC_ERR_OK) {
+        return 0;
+    }
+
+    const auto replacement = allocate_heap(size);
+    if (!replacement) {
+        return 0;
+    }
+
+    if ((!contents.empty() && uc_mem_write(m_uc, replacement, contents.data(), contents.size()) != UC_ERR_OK) ||
+        !free_heap(address)) {
+        free_heap(replacement);
+        return 0;
+    }
+
+    return replacement;
+}
+
 uint64_t c_emulator_ctx::allocate_storage(const uint32_t size, const std::string &tag) const {
     const auto region_base = m_memory_manager->allocate_helper_stub(size);
-    const auto aligned_size = page_up(size, 0x1000);
+    const auto aligned_size = m_memory_manager->get_region_size(region_base);
 
     if (const auto err = uc_mem_map(m_uc, region_base, aligned_size, UC_PROT_ALL); err != UC_ERR_OK) {
-        //
+        m_memory_manager->free_region(region_base);
         throw std::runtime_error("emulator ctx: failed to allocate region: " + std::to_string(err));
     }
 
-    const std::vector<uint8_t> region_dump(aligned_size, 0);
-    uc_mem_write(m_uc, region_base, region_dump.data(), region_dump.size());
+    m_storage_allocations.insert(region_base);
 
     if (!tag.empty()) {
         std::stringstream tag_with_addr_stream;
@@ -812,6 +949,118 @@ uint64_t c_emulator_ctx::allocate_storage(const uint32_t size, const std::string
     }
 
     return region_base;
+}
+
+bool c_emulator_ctx::free_storage(const uint64_t address) const {
+    if (!m_storage_allocations.contains(address)) {
+        return false;
+    }
+
+    const auto size = m_memory_manager->get_region_size(address);
+    if (!size || uc_mem_unmap(m_uc, address, size) != UC_ERR_OK) {
+        return false;
+    }
+
+    m_storage_allocations.erase(address);
+    return m_memory_manager->free_region(address);
+}
+
+uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t size, const uint32_t type) const {
+    if (!size || size > 0xFFFFF000ULL || !(type & 0x3000) || (type & ~0x3000U)) {
+        return 0;
+    }
+
+    if (!address) {
+        const auto base = allocate_storage(static_cast<uint32_t>(size), "vm");
+        const auto capacity = m_memory_manager->get_region_size(base);
+        const bool committed = (type & 0x1000) != 0;
+        if (!committed && uc_mem_unmap(m_uc, base, capacity) != UC_ERR_OK) {
+            free_storage(base);
+            return 0;
+        }
+
+        m_storage_allocations.erase(base);
+        m_virtual_allocations.emplace(base, s_virtual_allocation{std::vector<bool>(capacity / 0x1000, committed)});
+        return base;
+    }
+
+    auto entry = m_virtual_allocations.upper_bound(address);
+    if (type != 0x1000 || entry == m_virtual_allocations.begin()) {
+        return 0;
+    }
+
+    --entry;
+
+    const auto capacity = entry->second.m_committed_pages.size() * 0x1000;
+    const auto offset = address - entry->first;
+
+    if (offset >= capacity || size > capacity - offset) {
+        return 0;
+    }
+
+    const auto first_page = offset / 0x1000;
+    const auto last_page = page_up(offset + size, 0x1000) / 0x1000;
+    std::vector<size_t> mapped_pages{};
+
+    for (auto page = first_page; page < last_page; ++page) {
+        if (entry->second.m_committed_pages[page]) {
+            continue;
+        }
+
+        if (uc_mem_map(m_uc, entry->first + page * 0x1000, 0x1000, UC_PROT_ALL) != UC_ERR_OK) {
+            for (const auto mapped_page : mapped_pages) {
+                uc_mem_unmap(m_uc, entry->first + mapped_page * 0x1000, 0x1000);
+                entry->second.m_committed_pages[mapped_page] = false;
+            }
+            return 0;
+        }
+
+        entry->second.m_committed_pages[page] = true;
+        mapped_pages.push_back(page);
+    }
+
+    return entry->first + first_page * 0x1000;
+}
+
+bool c_emulator_ctx::free_virtual(const uint64_t address, const uint64_t size, const uint32_t type) const {
+    auto entry = m_virtual_allocations.upper_bound(address);
+
+    if (entry == m_virtual_allocations.begin() || (type != 0x8000 && type != 0x4000)) {
+        return false;
+    }
+
+    --entry;
+
+    const auto capacity = entry->second.m_committed_pages.size() * 0x1000;
+    const auto offset = address - entry->first;
+
+    if (offset >= capacity || size > capacity - offset ||
+        (type == 0x8000 && (offset || size)) || (!size && offset)) {
+        return false;
+    }
+
+    const auto first_page = offset / 0x1000;
+    const auto last_page = size ? page_up(offset + size, 0x1000) / 0x1000 : capacity / 0x1000;
+    for (auto page = first_page; page < last_page; ++page) {
+        if (!entry->second.m_committed_pages[page]) {
+            continue;
+        }
+
+        const auto page_address = entry->first + page * 0x1000;
+        if (uc_mem_unmap(m_uc, page_address, 0x1000) != UC_ERR_OK) {
+            return false;
+        }
+
+        entry->second.m_committed_pages[page] = false;
+        m_memory_manager->write_memory(page_address, std::vector<uint8_t>(0x1000, 0));
+    }
+
+    if (type == 0x8000) {
+        m_memory_manager->free_region(entry->first);
+        m_virtual_allocations.erase(entry);
+    }
+
+    return true;
 }
 
 void c_emulator_ctx::initialize_windows_ldr() const {

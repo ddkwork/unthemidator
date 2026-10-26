@@ -44,6 +44,7 @@ Not to mention that packed kernel drivers are extremely rare and can only run on
 Below is a complete overview of all unthemidator options.
 
 - `--out-file` - output file name / path. Defaults to `{program_name}.unpacked.{program_extension}`
+- `--license-file` - license file name / path. Required for successful WinLicense protected binaries unpacking.
 - `--imports-file` - name (or path) of the file to save information about imports to. Should be JSON. Defaults to `{program_name}.imports.json`
 - `--vms-file` - name (or path) of the file to save information about VM entry points to. Should be JSON. Defaults to `{program_name}.vms.json`
 - `--vm-depth` - for virtual machine research and virtual instruction tracing, how many virtualization layers should be single-stepped. Defaults to `0` - no VM exploration.

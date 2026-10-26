@@ -64,6 +64,7 @@ add_executable(unthemidator
         src/unpacker/s_themida_instruction.hpp
         src/unpacker/themida_structs.hpp
         src/unpacker/c_themida_unpacker_emu.cpp
+        src/emulator/wl_hooks.cpp
         src/emulator/hooks.cpp
         src/emulator/hooks.hpp
         src/pe/pe_utils.cpp
