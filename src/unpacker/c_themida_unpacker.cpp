@@ -254,7 +254,7 @@ void c_themida_unpacker::decompress_vms() {
 }
 
 uint32_t c_themida_unpacker::get_oep_rva() const {
-    return m_real_entry_address - m_memory_manager->get_image_base();
+    return static_cast<uint32_t>(m_real_entry_address - m_memory_manager->get_image_base());
 }
 
 const std::vector<s_themida_recovered_import> &c_themida_unpacker::get_recovered_imports() const {
@@ -262,8 +262,7 @@ const std::vector<s_themida_recovered_import> &c_themida_unpacker::get_recovered
 }
 
 void c_themida_unpacker::on_region_save(const uint64_t address, const uint32_t size) {
-    // remove memory hook if it was setup
-    m_emulator_ctx->remove_mem_hook(address);
+    on_region_made_writable(address, size);
 
     // save final version of region
     std::vector<uint8_t> region_dump(size, 0);
@@ -297,54 +296,51 @@ void c_themida_unpacker::on_region_save(const uint64_t address, const uint32_t s
             UC_PROT_READ | UC_PROT_WRITE);
     }
 
-    m_log_writes_range = std::nullopt;
-
     std::cout << "[unthemidator][runtime] saved unpacked region (section): 0x" << std::hex << address <<
         " -> 0x" << (address + size) << std::dec << std::endl;
 }
 
 void c_themida_unpacker::on_region_made_writable(const uint64_t address, const uint32_t size) {
-    m_log_writes_range = {std::make_pair(address, address + size)};
-
     const auto image_base = m_memory_manager->get_image_base();
+    const auto image_size = m_memory_manager->get_image_size();
 
-    // if emulation is not VM instance based, stop emulation, setup memory hook and resume
-    if (const auto is_in_image = address >= image_base && address < image_base + m_memory_manager->get_image_size();
-        m_options.m_max_nested_vms == 0 && is_in_image) {
-        //
-        m_emulator_ctx->remove_mem_hook(address);
-
-        const auto ptr_size = m_pe_image->get_ptr_size();
-
-        m_emulator_ctx->add_mem_hook(UC_HOOK_MEM_WRITE, [&, ptr_size](uc_engine* uc, const uc_mem_type, const uint64_t addr,
-            const int sz, const int64_t value) {
-            //
-            if (sz != ptr_size) {
-                return;
-            }
-
-            if (!m_log_writes_range.has_value() || addr < m_log_writes_range->first || addr > m_log_writes_range->second) {
-                return;
-            }
-
-            if (m_updated_pointers.contains(addr)) {
-                return;
-            }
-
-            uint64_t orig_value = 0;
-            uc_mem_read(uc, addr, &orig_value, ptr_size);
-
-            if (orig_value) {
-                m_updated_pointers.emplace(addr, orig_value);
-            } else {
-                m_updated_pointers.emplace(addr,
-                    ptr_size == 4 ? static_cast<uint32_t>(value) : static_cast<uint64_t>(value));
-            }
-        }, m_log_writes_range->first, m_log_writes_range->second);
+    if (address < image_base || address - image_base >= image_size || !size || size > image_size - (address - image_base)) {
+        return;
     }
+
+    m_local_regions[address] = std::max(m_local_regions[address], size);
+
+    m_emulator_ctx->remove_mem_hook(address);
+
+    const auto ptr_size = m_pe_image->get_ptr_size();
+    const auto region_size = m_local_regions.at(address);
+
+    m_emulator_ctx->add_mem_hook(UC_HOOK_MEM_WRITE, [this, address, region_size, ptr_size](uc_engine* uc, const uc_mem_type,
+        const uint64_t addr, const int sz, const int64_t value) {
+        //
+        if (sz != ptr_size || addr < address || addr - address >= region_size || ptr_size > region_size - (addr - address)) {
+            return;
+        }
+
+        if (m_updated_pointers.contains(addr)) {
+            return;
+        }
+
+        uint64_t orig_value = 0;
+        uc_mem_read(uc, addr, &orig_value, ptr_size);
+
+        if (orig_value) {
+            m_updated_pointers.emplace(addr, orig_value);
+        } else {
+            m_updated_pointers.emplace(addr,
+                ptr_size == 4 ? static_cast<uint32_t>(value) : static_cast<uint64_t>(value));
+        }
+    }, address, address + region_size - 1);
 }
 
 void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
+    // fixme: this assumes that the first call to the .text section is OEP,
+    //  which is not always the case, for example TLS callbacks go first
     m_emulator_ctx->stop(address);
 
     // restore vm enters' prologues
@@ -355,7 +351,9 @@ void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
 
         // remove hook
         m_emulator_ctx->remove_hook(trampoline.m_vm_enter_address);
+    }
 
+    for (const auto &trampoline : m_vm_trampolines) {
         if (trampoline.m_vm_enter_address == address) {
             m_real_entry_address = trampoline.m_trampoline_address;
 
@@ -410,6 +408,19 @@ void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
 
         // update loader region with its last version
         m_memory_manager->write_memory(m_loader_region->first, loader);
+    }
+
+    // update all local regions with their final values
+    for (const auto &[region_address, region_size] : m_local_regions) {
+        m_emulator_ctx->remove_mem_hook(region_address);
+
+        std::vector<uint8_t> region_dump(region_size, 0);
+
+        if (uc_mem_read(m_emulator_ctx->get_uc(), region_address, region_dump.data(), region_dump.size()) != UC_ERR_OK) {
+            throw std::runtime_error("failed to read local region");
+        }
+
+        m_memory_manager->write_memory(region_address, region_dump);
     }
 
     // generate runtime fixer shellcode (TLS callback)

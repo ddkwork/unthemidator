@@ -408,6 +408,8 @@ void hooks::virtual_protect(const c_emulator_ctx *ctx) {
     const auto new_prot = static_cast<uint32_t>(ctx->get_arg(2));
     const auto old_prot_ptr = ctx->get_arg(3);
 
+    printf("[+] virtual protect: base=0x%llX, size=0x%X, new_prot=0x%X...\n", address, size, new_prot); // fixme : remove
+
     handle_virtual_protection(ctx, address, size, new_prot, old_prot_ptr);
     ctx->set_result(1);
 }

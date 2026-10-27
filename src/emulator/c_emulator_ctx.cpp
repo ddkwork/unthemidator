@@ -106,11 +106,10 @@ static bool dispatch_hook(uc_engine *uc, const uint64_t address, c_emulator_ctx*
         throw std::runtime_error("unexpected bp!");
     }
 
-    /*
     if (hook->m_name != "GetProcessHeap" && hook->m_name != "RtlFreeHeap" && hook->m_name != "RtlAllocateHeap" &&
         hook->m_name != "RtlReAllocateHeap") {
         printf("[+] calling %s from 0x%llX, ret addr 0x%llX...\n", hook->m_name.c_str(), address, ret_addr);
-    }*/
+    }
 
     const auto arg_count = hook->m_arg_count;
 
@@ -830,11 +829,14 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
 }
 
 uint64_t c_emulator_ctx::get_pc() const {
-    if (get_arch() == e_architecture::k_x86) {
-        return get_x86_reg_value(UC_X86_REG_EIP);
-    }
-
     switch (m_emulator->get_arch()) {
+        case e_architecture::k_x86: {
+            uint32_t eip;
+            uc_reg_read(m_uc, UC_X86_REG_EIP, &eip);
+
+            return eip;
+        }
+
         case e_architecture::k_amd64: {
             uint64_t rip;
             uc_reg_read(m_uc, UC_X86_REG_RIP, &rip);
@@ -849,14 +851,15 @@ uint64_t c_emulator_ctx::get_pc() const {
 }
 
 void c_emulator_ctx::set_pc(const uint64_t new_pc) const {
-    if (get_arch() == e_architecture::k_x86) {
-        set_x86_reg_value(UC_X86_REG_EIP, new_pc);
-        return;
-    }
-
     switch (m_emulator->get_arch()) {
         case e_architecture::k_amd64: {
             uc_reg_write(m_uc, UC_X86_REG_RIP, &new_pc);
+            break;
+        }
+
+        case e_architecture::k_x86: {
+            const auto eip = static_cast<uint32_t>(new_pc);
+            uc_reg_write(m_uc, UC_X86_REG_EIP, &eip);
             break;
         }
 
@@ -891,15 +894,18 @@ bool c_emulator_ctx::free_heap(const uint64_t address) const {
 
 uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t size, const uint32_t flags) const {
     const auto entry = m_heap_allocations.find(address);
+
     if (entry == m_heap_allocations.end() || size > 0xFFFFF000ULL) {
         return 0;
     }
 
-    const auto old = entry->second;
-    if (size <= old.m_capacity) {
-        if ((flags & 0x8) && size > old.m_size) {
-            const std::vector<uint8_t> zeros(static_cast<size_t>(size - old.m_size), 0);
-            if (uc_mem_write(m_uc, address + old.m_size, zeros.data(), zeros.size()) != UC_ERR_OK) {
+    const auto [entry_size, entry_capacity] = entry->second;
+
+    if (size <= entry_capacity) {
+        if (flags & 0x8 && size > entry_size) {
+            const std::vector<uint8_t> zeros(size - entry_size, 0);
+
+            if (uc_mem_write(m_uc, address + entry_size, zeros.data(), zeros.size()) != UC_ERR_OK) {
                 return 0;
             }
         }
@@ -912,7 +918,7 @@ uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t 
         return 0;
     }
 
-    std::vector<uint8_t> contents(old.m_size);
+    std::vector<uint8_t> contents(entry_size);
     if (!contents.empty() && uc_mem_read(m_uc, address, contents.data(), contents.size()) != UC_ERR_OK) {
         return 0;
     }
@@ -924,6 +930,7 @@ uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t 
 
     if ((!contents.empty() && uc_mem_write(m_uc, replacement, contents.data(), contents.size()) != UC_ERR_OK) ||
         !free_heap(address)) {
+        //
         free_heap(replacement);
         return 0;
     }

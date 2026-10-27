@@ -2,6 +2,7 @@
 #define UNTHEMIDATOR_C_THEMIDA_UNPACKER_HPP
 
 #include <deque>
+#include <map>
 
 #include "../emulator/c_emulator.hpp"
 #include "../pe/c_pe_image.hpp"
@@ -66,7 +67,8 @@ private:
     bool m_found_oep = false;
 
     std::optional<std::pair<uint64_t, uint64_t>> m_loader_region = std::nullopt;
-    std::optional<std::pair<uint64_t, uint64_t>> m_log_writes_range = std::nullopt;
+
+    std::map<uint64_t, uint32_t> m_local_regions{};
 
     // map of updated pointers: pointer VA -> initial value
     std::unordered_map<uint64_t, uint64_t> m_updated_pointers{};

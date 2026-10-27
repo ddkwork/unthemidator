@@ -28,34 +28,11 @@ void c_themida_unpacker::run_virtual_instruction(const uint64_t address) {
         const auto is_vm_active_address = m_vm_instances.back()->m_vm_ctx + m_vm_instances.back()->m_is_in_vm_offset;
         uint64_t run_until = 0;
 
-        const auto ptr_size = m_pe_image->get_ptr_size();
-
         m_emulator_ctx->run(m_emulator_ctx->get_pc(), run_until, nullptr,
             [&](uc_engine* uc, const uc_mem_type mem_type, const uint64_t addr,
-                const int size, const int64_t value) -> void {
+                const int, const int64_t value) -> void {
                 //
                 if (mem_type != UC_MEM_WRITE) {
-                    return;
-                }
-
-                // log writes of import pointers
-                if (m_log_writes_range.has_value() && addr >= m_log_writes_range->first && addr <= m_log_writes_range->second &&
-                    size == ptr_size) {
-                    //
-                    if (m_updated_pointers.contains(addr)) {
-                        return;
-                    }
-
-                    uint64_t orig_value = 0;
-                    uc_mem_read(uc, addr, &orig_value, ptr_size);
-
-                    if (orig_value) {
-                        m_updated_pointers.emplace(addr, orig_value);
-                    } else {
-                        m_updated_pointers.emplace(addr,
-                            ptr_size == 4 ? static_cast<uint32_t>(value) : static_cast<uint64_t>(value));
-                    }
-
                     return;
                 }
 
