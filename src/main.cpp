@@ -291,6 +291,7 @@ int main(int argc, char *argv[]) {
                     { "WriteFile", { hooks::dummy_true_function, 5 } },
                     { "DeleteFileA", { hooks::dummy_true_function, 1 } },
                     { "DeleteFileW", { hooks::dummy_true_function, 1 } },
+                    { "InitializeSListHead", { hooks::dummy_function, 1 } },
                 }
             },
             {
@@ -471,6 +472,9 @@ int main(int argc, char *argv[]) {
 
     pe_builder->set_entry_rva(unpacker->get_oep_rva());
     pe_builder->set_imports(unpacker->get_recovered_imports());
+    if (unpacker->has_recovered_startup_entries()) {
+        pe_builder->set_tls_callbacks(unpacker->get_tls_callbacks());
+    }
 
     if (!options.m_skip_loader) {
         pe_builder->set_loader_shellcode(unpacker->get_loader_shellcode());

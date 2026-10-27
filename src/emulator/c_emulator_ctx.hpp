@@ -47,20 +47,21 @@ public:
     };
 
     void set_file_sources(const std::string &input_name, const std::string &license_name, std::vector<uint8_t> license);
-    uint64_t open_file(const std::string &path) const;
-    uint64_t create_file_mapping(uint64_t handle, uint64_t size, uint32_t protection) const;
-    const s_file_handle* get_file_handle(uint64_t handle, bool mapping) const;
-    bool close_file_handle(uint64_t handle) const;
+
+    uint64_t open_file(const std::string &path);
+    uint64_t create_file_mapping(uint64_t handle, uint64_t size, uint32_t protection);
+
+    const s_file_handle* get_file_handle(uint64_t handle, bool mapping);
+    bool close_file_handle(uint64_t handle);
 
     void set_themida_unpacker(c_themida_unpacker* unpacker);
     [[nodiscard]] c_themida_unpacker* get_themida_unpacker() const;
 
     [[nodiscard]] uint64_t get_x86_reg_value(uc_x86_reg reg) const;
-
     void set_x86_reg_value(uc_x86_reg reg, uint64_t value) const;
 
     [[nodiscard]] uint64_t get_arg(uint32_t index) const;
-    void set_arg(uint32_t index, uint64_t value) const;
+    void set_arg(uint32_t index, uint64_t value);
     void set_result(uint64_t value) const;
 
     void add_hook(uint64_t address, const std::string &name, const std::function<void(c_emulator_ctx*)> &hook, uint32_t arg_count = 0);
@@ -73,14 +74,14 @@ public:
         uint32_t m_flags = 0, m_process_id = 0, m_index = 0;
     };
 
-    uint64_t create_process_snapshot(uint32_t flags, uint32_t process_id) const;
-    s_process_snapshot* get_process_snapshot(uint64_t handle) const;
-    bool close_process_snapshot(uint64_t handle) const;
+    uint64_t create_process_snapshot(uint32_t flags, uint32_t process_id);
+    s_process_snapshot* get_process_snapshot(uint64_t handle);
+    bool close_process_snapshot(uint64_t handle);
 
     void add_exception_handler(uint64_t address);
     void remove_exception_handler(uint64_t address);
     void raise_exception(uint32_t exception_code);
-    void run_thread(uint64_t address, uint64_t end, uint64_t param) const;
+    void run_thread(uint64_t address, uint64_t end, uint64_t param);
 
     const s_hooked_function* get_hook(uint64_t address);
 
@@ -102,7 +103,7 @@ public:
     }
 
     template <typename T>
-    [[nodiscard]] bool write(const uint64_t address, T value) const {
+    [[nodiscard]] bool write(const uint64_t address, T value) {
         static_assert(std::is_trivially_copyable_v<T>, "write<T> requires a trivially copyable type");
 
         if (c_memory::overlaps_shared_data(address, sizeof(T))) {
@@ -116,25 +117,29 @@ public:
         return true;
     }
 
-    void single_step(std::function<mem_callback_t> on_mem = nullptr) const;
+    void single_step(std::function<mem_callback_t> on_mem = nullptr);
 
-    void stop(uint64_t address) const;
+    void stop(uint64_t address);
+    void return_from_call(uint32_t arg_count);
+
     [[nodiscard]] bool is_stopped() const { return m_stop_requested; }
+    void set_stop_on_import(const bool enabled) { m_stop_on_import = enabled; }
+    [[nodiscard]] bool stops_on_import() const { return m_stop_on_import; }
 
     void run(uint64_t start, uint64_t end = 0, std::function<code_callback_t> on_code = nullptr,
-        std::function<mem_callback_t> on_mem = nullptr) const;
+        std::function<mem_callback_t> on_mem = nullptr);
 
     [[nodiscard]] uint64_t get_pc() const;
     void set_pc(uint64_t new_pc) const;
 
-    [[nodiscard]] uint64_t allocate_storage(uint32_t size, const std::string &tag = {}) const;
-    [[nodiscard]] uint64_t allocate_heap(uint64_t size) const;
-    [[nodiscard]] uint64_t reallocate_heap(uint64_t address, uint64_t size, uint32_t flags) const;
+    uint64_t allocate_storage(uint32_t size, const std::string &tag = {});
+    uint64_t allocate_heap(uint64_t size);
+    uint64_t reallocate_heap(uint64_t address, uint64_t size, uint32_t flags);
 
-    bool free_storage(uint64_t address) const;
-    bool free_heap(uint64_t address) const;
-    [[nodiscard]] uint64_t allocate_virtual(uint64_t address, uint64_t size, uint32_t type) const;
-    bool free_virtual(uint64_t address, uint64_t size, uint32_t type) const;
+    bool free_storage(uint64_t address);
+    bool free_heap(uint64_t address);
+    uint64_t allocate_virtual(uint64_t address, uint64_t size, uint32_t type);
+    bool free_virtual(uint64_t address, uint64_t size, uint32_t type);
 
     void initialize_windows_ldr() const;
 private:
@@ -142,19 +147,23 @@ private:
         uint32_t m_size;
         uint32_t m_capacity;
     };
-    mutable std::unordered_map<uint64_t, s_heap_allocation> m_heap_allocations{};
-    mutable std::unordered_set<uint64_t> m_storage_allocations{};
+
+    std::unordered_map<uint64_t, s_heap_allocation> m_heap_allocations{};
+    std::unordered_set<uint64_t> m_storage_allocations{};
 
     struct s_virtual_allocation {
         std::vector<bool> m_committed_pages;
     };
-    mutable std::map<uint64_t, s_virtual_allocation> m_virtual_allocations{};
-    static bool fetch_prot_callback(uc_engine *uc, uc_mem_type type, uint64_t address, int size, int64_t value, c_emulator_ctx* ctx);
-    uc_err emulate(uint64_t start, uint64_t end, size_t count) const;
 
-    mutable std::optional<uint64_t> m_hook_resume;
-    mutable bool m_stop_requested = false;
-    mutable size_t m_emulation_depth = 0;
+    std::map<uint64_t, s_virtual_allocation> m_virtual_allocations{};
+
+    static bool fetch_prot_callback(uc_engine *uc, uc_mem_type type, uint64_t address, int size, int64_t value, c_emulator_ctx* ctx);
+    [[nodiscard]] uc_err emulate(uint64_t start, uint64_t end, size_t count);
+
+    std::optional<uint64_t> m_hook_resume;
+    bool m_stop_requested = false;
+    bool m_stop_on_import = false;
+    size_t m_emulation_depth = 0;
 
     uc_engine *m_uc;
     c_emulator *m_emulator;
@@ -169,11 +178,13 @@ private:
 
     std::unordered_set<uint64_t> m_exception_handlers{};
 
-    mutable std::unordered_map<uint64_t, s_process_snapshot> m_process_snapshots{};
-    mutable uint64_t m_next_handle = 0x10000;
+    std::unordered_map<uint64_t, s_process_snapshot> m_process_snapshots{};
+    uint64_t m_next_handle = 0x10000;
+
     std::unordered_map<std::string, const std::vector<uint8_t>*> m_file_sources{};
+
     std::vector<uint8_t> m_license_file{};
-    mutable std::unordered_map<uint64_t, s_file_handle> m_file_handles{};
+    std::unordered_map<uint64_t, s_file_handle> m_file_handles{};
 
     uint64_t m_exception_stack = 0;
     uint64_t m_exception_return_address = 0;

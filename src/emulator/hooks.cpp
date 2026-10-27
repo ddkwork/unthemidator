@@ -13,7 +13,7 @@
 
 namespace {
     template<typename T>
-    bool read_conversion_input(const c_emulator_ctx *ctx, uint64_t address, const int count, std::vector<T> &input) {
+    bool read_conversion_input(c_emulator_ctx *ctx, uint64_t address, const int count, std::vector<T> &input) {
         if (count != -1) {
             input.resize(static_cast<size_t>(count));
             return uc_mem_read(ctx->get_uc(), address, input.data(), input.size() * sizeof(T)) == UC_ERR_OK;
@@ -41,10 +41,10 @@ namespace {
 
     uint64_t teb_field(const c_emulator_ctx *ctx, const uint32_t offset32, const uint32_t offset64) {
         return ctx->get_memory()->get_address_by_tag("TEB").value() +
-            (ctx->get_arch() == e_architecture::k_x86 ? offset32 : offset64);
+               (ctx->get_arch() == e_architecture::k_x86 ? offset32 : offset64);
     }
 
-    void write_last_error(const c_emulator_ctx *ctx, const uint32_t error) {
+    void write_last_error(c_emulator_ctx *ctx, const uint32_t error) {
         if (!ctx->write<uint32_t>(teb_field(ctx, 0x34, 0x68), error)) {
             throw std::runtime_error("failed to write last error");
         }
@@ -56,10 +56,11 @@ namespace {
         uint32_t status = 0;
     };
 
-    s_file_view map_file_view(const c_emulator_ctx *ctx, const std::vector<uint8_t>& file, const uint64_t file_size,
+    s_file_view map_file_view(c_emulator_ctx *ctx, const std::vector<uint8_t> &file, const uint64_t file_size,
         const uint64_t offset, uint64_t bytes) {
+        //
         if (offset >= file_size || file_size > file.size()) {
-            return { .status = 0xC000000D }; // STATUS_INVALID_PARAMETER
+            return {.status = 0xC000000D}; // STATUS_INVALID_PARAMETER
         }
 
         const auto remaining = file_size - offset;
@@ -69,7 +70,7 @@ namespace {
         }
 
         if (bytes > remaining || bytes > UINT32_MAX - 0xFFF) {
-            return { .status = 0xC000001F }; // STATUS_INVALID_VIEW_SIZE
+            return {.status = 0xC000001F}; // STATUS_INVALID_VIEW_SIZE
         }
 
         const auto size = static_cast<uint32_t>(page_up(bytes, 0x1000));
@@ -80,7 +81,7 @@ namespace {
             //
             ctx->free_storage(base);
 
-            return { .status = 0xC0000005 }; // STATUS_ACCESS_VIOLATION
+            return {.status = 0xC0000005}; // STATUS_ACCESS_VIOLATION
         }
 
         return {
@@ -91,7 +92,7 @@ namespace {
     }
 
     template<typename T, typename C>
-    void write_process_entry(const c_emulator_ctx *ctx, const bool first) {
+    void write_process_entry(c_emulator_ctx *ctx, const bool first) {
         struct s_process_entry {
             uint32_t size, usage, process_id;
             T default_heap_id;
@@ -101,8 +102,7 @@ namespace {
             C exe_file[260];
         };
 
-        static_assert(sizeof(s_process_entry) == (sizeof(T) == 4 ? (sizeof(C) == 1 ? 296 : 556) :
-            sizeof(C) == 1 ? 304 : 568));
+        static_assert(sizeof(s_process_entry) == (sizeof(T) == 4 ? (sizeof(C) == 1 ? 296 : 556) : sizeof(C) == 1 ? 304 : 568));
 
         const auto address = ctx->get_arg(1);
         const auto snapshot = ctx->get_process_snapshot(ctx->get_arg(0));
@@ -116,18 +116,18 @@ namespace {
         struct s_process {
             uint32_t process_id, parent_process_id, threads;
             int32_t base_priority;
-            const char* name;
+            const char *name;
         };
 
         const s_process processes[] = {
-            { 4, 0, 80, 8, "System" },
-            { 256, 4, 2, 11, "smss.exe" },
-            { 384, 256, 8, 13, "csrss.exe" },
-            { 448, 256, 1, 13, "wininit.exe" },
-            { 512, 448, 6, 9, "services.exe" },
-            { 576, 448, 8, 9, "lsass.exe" },
-            { 768, 512, 10, 8, "svchost.exe" },
-            { snapshot->m_process_id, 0, 1, 8, "bebra.exe" },
+            {4, 0, 80, 8, "System"},
+            {256, 4, 2, 11, "smss.exe"},
+            {384, 256, 8, 13, "csrss.exe"},
+            {448, 256, 1, 13, "wininit.exe"},
+            {512, 448, 6, 9, "services.exe"},
+            {576, 448, 8, 9, "lsass.exe"},
+            {768, 512, 10, 8, "svchost.exe"},
+            {snapshot->m_process_id, 0, 1, 8, "bebra.exe"},
         };
         const auto index = first ? 0 : snapshot->m_index;
 
@@ -178,7 +178,7 @@ namespace {
 
         if (new_prot != k_protection_marker) {
             if (uc_mem_write(ctx->get_uc(), old_prot_ptr,
-                &k_protection_marker, sizeof(k_protection_marker)) != UC_ERR_OK) {
+                             &k_protection_marker, sizeof(k_protection_marker)) != UC_ERR_OK) {
                 //
                 throw std::runtime_error("failed to write old memory protection");
             }
@@ -216,7 +216,7 @@ void hooks::get_module_handle(const c_emulator_ctx *ctx) {
     ctx->set_result(module_handle);
 
     std::cout << "[unthemidator][runtime] loaded module: " << module_name << " (forwarded to unthemidator.dummy) - 0x" <<
-        std::hex << module_handle << std::dec << std::endl;
+            std::hex << module_handle << std::dec << std::endl;
 }
 
 void hooks::get_proc_address(const c_emulator_ctx *ctx) {
@@ -245,12 +245,12 @@ void hooks::get_proc_address(const c_emulator_ctx *ctx) {
     }
 
     std::cout << "[unthemidator][runtime] loaded function " << function_name << std::hex << " (0x" <<
-        address << ") from mod 0x" << module_handle << std::dec << std::endl;
-    
+            address << ") from mod 0x" << module_handle << std::dec << std::endl;
+
     ctx->set_result(address);
 }
 
-void hooks::create_file_a(const c_emulator_ctx *ctx) {
+void hooks::create_file_a(c_emulator_ctx *ctx) {
     std::vector<char> path;
     const auto readable = read_conversion_input(ctx, ctx->get_arg(0), -1, path);
 
@@ -265,7 +265,7 @@ void hooks::create_file_a(const c_emulator_ctx *ctx) {
     ctx->set_result(handle ? handle : UINT64_MAX);
 }
 
-void hooks::create_file_w(const c_emulator_ctx *ctx) {
+void hooks::create_file_w(c_emulator_ctx *ctx) {
     std::vector<char16_t> path;
     std::string text = "<unreadable path>";
 
@@ -293,11 +293,11 @@ void hooks::create_file_w(const c_emulator_ctx *ctx) {
     ctx->set_result(handle ? handle : UINT64_MAX);
 }
 
-void hooks::create_file_mapping(const c_emulator_ctx *ctx) {
+void hooks::create_file_mapping(c_emulator_ctx *ctx) {
     const auto file = ctx->get_file_handle(ctx->get_arg(0), false);
     const auto protection = static_cast<uint32_t>(ctx->get_arg(2));
     const auto size = (static_cast<uint64_t>(static_cast<uint32_t>(ctx->get_arg(3))) << 32) |
-        static_cast<uint32_t>(ctx->get_arg(4));
+                      static_cast<uint32_t>(ctx->get_arg(4));
     const auto file_size = file ? file->m_size : ctx->get_original_file_mapping().size();
     uint32_t error = 0;
     if (!ctx->get_arg(0)) {
@@ -305,7 +305,7 @@ void hooks::create_file_mapping(const c_emulator_ctx *ctx) {
     } else if (!file_size) {
         error = 1006;
     } else if (size > file_size || (protection != 2 && protection != 4 && protection != 8 &&
-        protection != 0x20 && protection != 0x40 && protection != 0x80)) {
+                                    protection != 0x20 && protection != 0x40 && protection != 0x80)) {
         error = 87;
     }
 
@@ -318,27 +318,27 @@ void hooks::create_file_mapping(const c_emulator_ctx *ctx) {
     ctx->set_result(ctx->create_file_mapping(ctx->get_arg(0), size, protection));
 }
 
-void hooks::rtl_allocate_heap(const c_emulator_ctx *ctx) {
+void hooks::rtl_allocate_heap(c_emulator_ctx *ctx) {
     ctx->set_result(ctx->allocate_heap(ctx->get_arg(2)));
 }
 
-void hooks::rtl_reallocate_heap(const c_emulator_ctx *ctx) {
+void hooks::rtl_reallocate_heap(c_emulator_ctx *ctx) {
     ctx->set_result(ctx->reallocate_heap(ctx->get_arg(2), ctx->get_arg(3),
         static_cast<uint32_t>(ctx->get_arg(1))));
 }
 
-void hooks::rtl_free_heap(const c_emulator_ctx *ctx) {
+void hooks::rtl_free_heap(c_emulator_ctx *ctx) {
     ctx->set_result(ctx->free_heap(ctx->get_arg(2)));
 }
 
-void hooks::local_alloc(const c_emulator_ctx *ctx) {
+void hooks::local_alloc(c_emulator_ctx *ctx) {
     const auto size = static_cast<uint32_t>(ctx->get_arg(1));
     const auto base = ctx->allocate_storage(size, "local_alloc");
 
     ctx->set_result(base);
 }
 
-void hooks::get_command_line_a(const c_emulator_ctx *ctx) {
+void hooks::get_command_line_a(c_emulator_ctx *ctx) {
     const auto str_location = ctx->allocate_storage(0x100);
 
     const std::string command_line = R"("C:\bebra.exe")";
@@ -347,7 +347,7 @@ void hooks::get_command_line_a(const c_emulator_ctx *ctx) {
     ctx->set_result(str_location);
 }
 
-void hooks::get_command_line_w(const c_emulator_ctx *ctx) {
+void hooks::get_command_line_w(c_emulator_ctx *ctx) {
     const auto str_location = ctx->allocate_storage(0x100);
 
     constexpr char16_t command_line[] = uR"("C:\bebra.exe")";
@@ -381,7 +381,7 @@ void hooks::get_version(const c_emulator_ctx *ctx) {
     ctx->set_result(0x65F4000A); // Windows 11 24H2 (build 26100)
 }
 
-void hooks::virtual_alloc(const c_emulator_ctx *ctx) {
+void hooks::virtual_alloc(c_emulator_ctx *ctx) {
     const auto base = ctx->allocate_virtual(ctx->get_arg(0), ctx->get_arg(1),
         static_cast<uint32_t>(ctx->get_arg(2)));
 
@@ -392,7 +392,7 @@ void hooks::virtual_alloc(const c_emulator_ctx *ctx) {
     ctx->set_result(base);
 }
 
-void hooks::virtual_free(const c_emulator_ctx *ctx) {
+void hooks::virtual_free(c_emulator_ctx *ctx) {
     const auto result = ctx->free_virtual(ctx->get_arg(0), ctx->get_arg(1),
         static_cast<uint32_t>(ctx->get_arg(2)));
 
@@ -422,7 +422,7 @@ void hooks::raise_exception(c_emulator_ctx *ctx) {
     ctx->raise_exception(exception_code);
 }
 
-void hooks::map_view_of_file(const c_emulator_ctx *ctx) {
+void hooks::map_view_of_file(c_emulator_ctx *ctx) {
     const auto handle = ctx->get_arg(0);
     const auto mapping = ctx->get_file_handle(handle, true);
     const auto access = static_cast<uint32_t>(ctx->get_arg(1));
@@ -454,6 +454,7 @@ void hooks::map_view_of_file(const c_emulator_ctx *ctx) {
 
     if (status) {
         write_last_error(ctx, status == 0xC0000005 ? 998 : 87);
+
         ctx->set_result(0);
         return;
     }
@@ -471,7 +472,7 @@ void hooks::map_view_of_file(const c_emulator_ctx *ctx) {
     ctx->set_result(base);
 }
 
-void hooks::get_file_size(const c_emulator_ctx *ctx) {
+void hooks::get_file_size(c_emulator_ctx *ctx) {
     const auto file_size_high_ptr = ctx->get_arg(1);
 
     const auto file = ctx->get_file_handle(ctx->get_arg(0), false);
@@ -494,7 +495,7 @@ void hooks::get_file_size(const c_emulator_ctx *ctx) {
     ctx->set_result(file_size_low);
 }
 
-void hooks::get_token_information(const c_emulator_ctx *ctx) {
+void hooks::get_token_information(c_emulator_ctx *ctx) {
     const auto required_size_ptr = ctx->get_arg(4);
 
     if (ctx->write<uint32_t>(required_size_ptr, 1)) {
@@ -502,7 +503,7 @@ void hooks::get_token_information(const c_emulator_ctx *ctx) {
     }
 }
 
-void hooks::get_thread_context(const c_emulator_ctx *ctx) {
+void hooks::get_thread_context(c_emulator_ctx *ctx) {
     const auto ctx_ptr = ctx->get_arg(1);
     const bool is_x64 = ctx->get_arch() == e_architecture::k_amd64;
 
@@ -597,7 +598,7 @@ void hooks::message_box_ex_a(const c_emulator_ctx *ctx) {
     throw std::runtime_error("enough...");
 }
 
-void hooks::nt_query_information_process(const c_emulator_ctx *ctx) {
+void hooks::nt_query_information_process(c_emulator_ctx *ctx) {
     const auto proc_info_class = static_cast<uint32_t>(ctx->get_arg(1));
     const auto proc_info_buffer = ctx->get_arg(2);
     const auto proc_info_length = static_cast<uint32_t>(ctx->get_arg(3));
@@ -605,7 +606,8 @@ void hooks::nt_query_information_process(const c_emulator_ctx *ctx) {
     uint32_t nt_status = 0;
 
     switch (proc_info_class) {
-        case 7: { // query debug port
+        case 7: {
+            // query debug port
             std::cout << "[unthemidator][runtime] bypassed DebugPort (NtQueryProcessInformation) debugger check" << std::endl;
 
             if (proc_info_length != (ctx->get_arch() == e_architecture::k_x86 ? 4 : 8)) {
@@ -621,7 +623,8 @@ void hooks::nt_query_information_process(const c_emulator_ctx *ctx) {
             break;
         }
 
-        case 30: { // query debug object handle
+        case 30: {
+            // query debug object handle
             std::cout << "[unthemidator][runtime] bypassed DebugObject (NtQueryProcessInformation) debugger check" << std::endl;
 
             if (proc_info_length != (ctx->get_arch() == e_architecture::k_x86 ? 4 : 8)) {
@@ -654,10 +657,12 @@ void hooks::nt_query_system_information(const c_emulator_ctx *ctx) {
 
     uint32_t nt_status = 0;
 
-    if (sys_info_class == 11) { // SystemModuleInformation
+    if (sys_info_class == 11) {
+        // SystemModuleInformation
         const auto query_modules = [&]<typename T>() {
             struct s_module_list {
                 uint32_t number_of_modules;
+
                 struct {
                     T section, mapped_base, image_base;
                     uint32_t image_size, flags;
@@ -738,8 +743,9 @@ void hooks::nt_protect_virtual_memory(const c_emulator_ctx *ctx) {
     ctx->set_result(0);
 }
 
-void hooks::nt_query_object(const c_emulator_ctx *ctx) {
-    if (static_cast<uint32_t>(ctx->get_arg(1)) != 0) { // ObjectBasicInformation
+void hooks::nt_query_object(c_emulator_ctx *ctx) {
+    if (static_cast<uint32_t>(ctx->get_arg(1)) != 0) {
+        // ObjectBasicInformation
         throw std::runtime_error("NtQueryObject: unsupported information class");
     }
 
@@ -786,7 +792,7 @@ void hooks::nt_query_object(const c_emulator_ctx *ctx) {
     ctx->set_result(0);
 }
 
-void hooks::check_remote_debugger(const c_emulator_ctx *ctx) {
+void hooks::check_remote_debugger(c_emulator_ctx *ctx) {
     if (ctx->write<uint32_t>(ctx->get_arg(1), 0)) {
         std::cout << "[unthemidator][runtime] bypassed remote debugger check" << std::endl;
         ctx->set_result(1);
@@ -795,11 +801,11 @@ void hooks::check_remote_debugger(const c_emulator_ctx *ctx) {
     }
 }
 
-void hooks::is_wow64_process(const c_emulator_ctx *ctx) {
+void hooks::is_wow64_process(c_emulator_ctx *ctx) {
     ctx->set_result(ctx->write<uint32_t>(ctx->get_arg(1), 0) ? 1 : 0);
 }
 
-void hooks::is_wow64_process2(const c_emulator_ctx *ctx) {
+void hooks::is_wow64_process2(c_emulator_ctx *ctx) {
     const auto process_machine_ptr = ctx->get_arg(1);
     const auto native_machine_ptr = ctx->get_arg(2);
 
@@ -831,11 +837,11 @@ void hooks::get_last_error(const c_emulator_ctx *ctx) {
     ctx->set_result(ctx->read<uint32_t>(teb_field(ctx, 0x34, 0x68)).value());
 }
 
-void hooks::set_last_error(const c_emulator_ctx *ctx) {
+void hooks::set_last_error(c_emulator_ctx *ctx) {
     write_last_error(ctx, static_cast<uint32_t>(ctx->get_arg(0)));
 }
 
-void hooks::create_toolhelp_snapshot(const c_emulator_ctx *ctx) {
+void hooks::create_toolhelp_snapshot(c_emulator_ctx *ctx) {
     const auto flags = static_cast<uint32_t>(ctx->get_arg(0));
     if (!(flags & 0x1F) || (flags & ~0x8000001FU)) {
         write_last_error(ctx, 87);
@@ -847,16 +853,18 @@ void hooks::create_toolhelp_snapshot(const c_emulator_ctx *ctx) {
     ctx->set_result(ctx->create_process_snapshot(flags, process_id));
 }
 
-void hooks::close_handle(const c_emulator_ctx *ctx) {
+void hooks::close_handle(c_emulator_ctx *ctx) {
     const auto success = ctx->close_file_handle(ctx->get_arg(0)) ||
         ctx->close_process_snapshot(ctx->get_arg(0)) || ctx->get_arg(0) == 1;
+
     if (!success) {
         write_last_error(ctx, 6);
     }
+
     ctx->set_result(success ? 1 : 0);
 }
 
-void hooks::process_first(const c_emulator_ctx *ctx) {
+void hooks::process_first(c_emulator_ctx *ctx) {
     if (ctx->get_arch() == e_architecture::k_x86) {
         write_process_entry<uint32_t, char>(ctx, true);
     } else {
@@ -864,7 +872,7 @@ void hooks::process_first(const c_emulator_ctx *ctx) {
     }
 }
 
-void hooks::process_first_w(const c_emulator_ctx *ctx) {
+void hooks::process_first_w(c_emulator_ctx *ctx) {
     if (ctx->get_arch() == e_architecture::k_x86) {
         write_process_entry<uint32_t, char16_t>(ctx, true);
     } else {
@@ -872,7 +880,7 @@ void hooks::process_first_w(const c_emulator_ctx *ctx) {
     }
 }
 
-void hooks::process_next(const c_emulator_ctx *ctx) {
+void hooks::process_next(c_emulator_ctx *ctx) {
     if (ctx->get_arch() == e_architecture::k_x86) {
         write_process_entry<uint32_t, char>(ctx, false);
     } else {
@@ -880,7 +888,7 @@ void hooks::process_next(const c_emulator_ctx *ctx) {
     }
 }
 
-void hooks::process_next_w(const c_emulator_ctx *ctx) {
+void hooks::process_next_w(c_emulator_ctx *ctx) {
     if (ctx->get_arch() == e_architecture::k_x86) {
         write_process_entry<uint32_t, char16_t>(ctx, false);
     } else {

@@ -64,6 +64,11 @@ void c_pe_builder::set_loader_shellcode(const std::vector<uint8_t> &shellcode) {
     m_loader_shellcode = shellcode;
 }
 
+void c_pe_builder::set_tls_callbacks(const std::vector<uint64_t> &callbacks) {
+    m_tls_callbacks = callbacks;
+    m_replace_tls_callbacks = true;
+}
+
 void c_pe_builder::build(const c_emulator_ctx& ctx) {
     auto mapped_image = m_memory_manager->get_mapped_image();
     // Locate the live resource entry using trusted headers, never the potentially
@@ -559,7 +564,7 @@ void c_pe_builder::build_import_descriptor() {
 }
 
 void c_pe_builder::build_tls() {
-    if (m_loader_shellcode.empty()) {
+    if (m_loader_shellcode.empty() && !m_replace_tls_callbacks) {
         return;
     }
 
@@ -602,7 +607,7 @@ void c_pe_builder::build_tls() {
 
         memcpy(tls.data(), mapped.data() + virtual_address, directory_size);
 
-        if (auto callback_array = read_pointer(tls, 3 * ptr_size)) {
+        if (auto callback_array = read_pointer(tls, 3 * ptr_size); callback_array && !m_replace_tls_callbacks) {
             for (;;) {
                 if (callback_array < image_base || callback_array - image_base > mapped.size() ||
                     ptr_size > mapped.size() - (callback_array - image_base)) {
@@ -622,13 +627,20 @@ void c_pe_builder::build_tls() {
         }
     }
 
-    const auto loader_rva = get_next_section_rva();
-    add_section(".fixer", m_loader_shellcode, k_scn_cnt_code | k_scn_mem_read | k_scn_mem_execute);
+    if (m_replace_tls_callbacks) {
+        callbacks = m_tls_callbacks;
+    }
+
+    if (!m_loader_shellcode.empty()) {
+        const auto loader_rva = get_next_section_rva();
+        add_section(".fixer", m_loader_shellcode, k_scn_cnt_code | k_scn_mem_read | k_scn_mem_execute);
+        callbacks.insert(callbacks.begin(), image_base + loader_rva);
+    }
 
     const auto tls_rva = get_next_section_rva();
     const auto index_offset = directory_size;
     const auto callbacks_offset = align_up(index_offset + sizeof(uint32_t), ptr_size);
-    const auto tls_size = static_cast<uint64_t>(callbacks_offset) + (callbacks.size() + 2ULL) * ptr_size;
+    const auto tls_size = static_cast<uint64_t>(callbacks_offset) + (callbacks.size() + 1ULL) * ptr_size;
 
     if (tls_size > UINT32_MAX || image_base > UINT64_MAX - tls_rva - tls_size ||
         (!is_x64 && image_base + tls_rva + tls_size > UINT32_MAX)) {
@@ -648,10 +660,8 @@ void c_pe_builder::build_tls() {
     }
 
     write_pointer(3 * ptr_size, image_base + tls_rva + callbacks_offset);
-    write_pointer(callbacks_offset, image_base + loader_rva);
-
     for (size_t i = 0; i < callbacks.size(); ++i) {
-        write_pointer(callbacks_offset + (i + 1) * ptr_size, callbacks[i]);
+        write_pointer(callbacks_offset + i * ptr_size, callbacks[i]);
     }
 
     add_section(".tls", tls, k_scn_cnt_initialized_data | k_scn_mem_read | k_scn_mem_write);

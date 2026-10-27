@@ -18,6 +18,7 @@ public:
     void set_imports(const std::vector<s_themida_recovered_import> &imports);
 
     void set_loader_shellcode(const std::vector<uint8_t> &shellcode);
+    void set_tls_callbacks(const std::vector<uint64_t> &callbacks);
 
     void build(const c_emulator_ctx& ctx);
 
@@ -42,6 +43,8 @@ private:
 
     std::vector<uint8_t> m_built_file{};
     std::vector<uint8_t> m_loader_shellcode{};
+    std::vector<uint64_t> m_tls_callbacks{};
+    bool m_replace_tls_callbacks = false;
 };
 
 #endif //UNTHEMIDATOR_C_PE_BUILDER_HPP
