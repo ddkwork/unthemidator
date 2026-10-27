@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iostream>
 #include <chrono>
+#include <fstream>
 #include <ranges>
 
 #include "../emulator/hooks.hpp"
@@ -418,19 +419,15 @@ void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
 }
 
 void c_themida_unpacker::on_thread_create(const uint64_t address, const uint64_t param) const {
-    // the param of CreateThread is the address of Sleep function
-    if (const auto imp = m_emulator_ctx->get_imports()->find_import_by_address(param);
-        !imp || imp->m_name != "Sleep") {
-        //
-        throw std::runtime_error("unpacker: unexpected CreateThread argument");
-    }
+    const auto sleep_fn = m_emulator_ctx->get_imports()->resolve_import("kernel32.dll",
+        "Sleep");
 
     std::cout << "[unthemidator][startup] emulating observer thread 0x" <<
-        std::hex << address << std::dec << "..." << std::endl;
+        std::hex << address << ", param: 0x" << param << std::dec << "..." << std::endl;
 
     // emulate asynchronous routine until Sleep function call,
     // cause when we're in the loop, it's safe to continue with unpacking
-    m_emulator_ctx->run_thread(address, param, param);
+    m_emulator_ctx->run_thread(address, sleep_fn, param);
 }
 
 const std::vector<uint8_t>& c_themida_unpacker::get_loader_shellcode() const {

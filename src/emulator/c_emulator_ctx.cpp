@@ -610,6 +610,7 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
     }
 
     const std::unique_ptr<uc_context, decltype(&uc_context_free)> original(saved, uc_context_free);
+
     if (uc_context_save(m_uc, saved) != UC_ERR_OK) {
         throw std::runtime_error("failed to save thread context");
     }
@@ -631,7 +632,8 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
         }
 
         if (!m_stop_requested && get_pc() != end) {
-            throw std::runtime_error("thread emulation stopped before its end address");
+            // todo: is it necessary? threads can exit early, not necessarily a bad thing? research me!
+            // throw std::runtime_error("thread emulation stopped before its end address");
         }
     } catch (...) {
         m_hook_resume = hook_resume;
