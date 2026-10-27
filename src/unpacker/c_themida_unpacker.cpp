@@ -9,6 +9,8 @@
 #include "../emulator/hooks.hpp"
 #include "../pe/pe_structs.hpp"
 
+#undef max
+
 c_themida_unpacker::c_themida_unpacker(const s_unpacker_options options, const std::shared_ptr<c_pe_image> &pe_image,
     const std::shared_ptr<c_emulator_ctx> &emulator_ctx, const std::shared_ptr<c_memory_manager> &memory_manager)
     : m_pe_image(pe_image), m_emulator_ctx(emulator_ctx), m_memory_manager(memory_manager), m_options(options) {
@@ -129,6 +131,11 @@ void c_themida_unpacker::startup() {
     }
 
     m_vm_handlers.emplace(m_real_entry_address, vm_enter);
+
+    // initialize entrypoint call arguments (assume default dll entry signature)
+    m_emulator_ctx->set_arg(0, m_memory_manager->get_image_base());
+    m_emulator_ctx->set_arg(1, 1); // DLL_PROCESS_ATTACH
+    m_emulator_ctx->set_arg(2, 0);
 
     // try running vm enter
     if (!run_vm_entry_setup(m_real_entry_address)) {
