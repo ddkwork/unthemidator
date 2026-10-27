@@ -11,6 +11,8 @@ public:
     explicit c_imports(c_emulator_ctx *emulator_ctx);
 
     uint64_t load_module(std::string module_name);
+
+    [[nodiscard]] uint64_t resolve_import(const std::string &module_name, const std::string &function_name) const;
     [[nodiscard]] uint64_t resolve_import(uint64_t module_base, const std::string &function_name) const;
     [[nodiscard]] uint64_t resolve_import(uint64_t module_base, uint16_t ordinal) const;
 

@@ -36,6 +36,7 @@ uint64_t c_memory_manager::allocate_helper_stub(const uint32_t size) {
 
     m_allocated_regions.emplace(address, std::vector<uint8_t>(aligned_size, 0));
     m_cursor = std::max(m_cursor, address + aligned_size);
+
     return address;
 }
 

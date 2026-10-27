@@ -268,12 +268,10 @@ void c_emulator_ctx::set_file_sources(const std::string &input_name, const std::
 
 uint64_t c_emulator_ctx::open_file(const std::string &path) const {
     const auto file = m_file_sources.find(file_name(path));
-    if (file == m_file_sources.end()) {
-        return 0;
-    }
+    const auto data = file == m_file_sources.end() ? &get_original_file_mapping() : file->second;
 
     const auto handle = m_next_handle++;
-    m_file_handles.emplace(handle, s_file_handle{file->second, file->second->size(), 0, false});
+    m_file_handles.emplace(handle, s_file_handle{data, data->size(), 0, false});
     return handle;
 }
 
@@ -284,11 +282,15 @@ const c_emulator_ctx::s_file_handle* c_emulator_ctx::get_file_handle(const uint6
 
 uint64_t c_emulator_ctx::create_file_mapping(const uint64_t handle, const uint64_t size, const uint32_t protection) const {
     const auto file = get_file_handle(handle, false);
-    if (!file || !file->m_size || size > file->m_size) {
+
+    const auto data = file ? file->m_data : &get_original_file_mapping();
+    const auto file_size = file ? file->m_size : data->size();
+
+    if (!handle || !file_size || size > file_size) {
         return 0;
     }
 
-    const s_file_handle mapping{file->m_data, size ? size : file->m_size, protection, true};
+    const s_file_handle mapping{data, size ? size : file_size, protection, true};
     const auto mapping_handle = m_next_handle++;
     m_file_handles.emplace(mapping_handle, mapping);
     return mapping_handle;
@@ -610,6 +612,7 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
     }
 
     const std::unique_ptr<uc_context, decltype(&uc_context_free)> original(saved, uc_context_free);
+
     if (uc_context_save(m_uc, saved) != UC_ERR_OK) {
         throw std::runtime_error("failed to save thread context");
     }
@@ -631,7 +634,8 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
         }
 
         if (!m_stop_requested && get_pc() != end) {
-            throw std::runtime_error("thread emulation stopped before its end address");
+            // todo: is it necessary? threads can exit early, not necessarily a bad thing? research me!
+            // throw std::runtime_error("thread emulation stopped before its end address");
         }
     } catch (...) {
         m_hook_resume = hook_resume;
@@ -809,11 +813,12 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
     err = emulate(start, end, 0);
 
     if (err != UC_ERR_OK /*&& err != UC_ERR_FETCH_PROT*/) {
+        /*
         printf("failed at 0x%llX , rsi - 0x%llX , rdi - 0x%llX , rax - 0x%llX , rbx - 0x%llX , r10 - 0x%llX, rbp - 0x%llX, r15 - 0x%llX, rcx - 0x%llX, r12 - 0x%llX\n",
             get_pc(),
             get_x86_reg_value(UC_X86_REG_RSI), get_x86_reg_value(UC_X86_REG_RDI), get_x86_reg_value(UC_X86_REG_RAX),
             get_x86_reg_value(UC_X86_REG_RBX), get_x86_reg_value(UC_X86_REG_R10), get_x86_reg_value(UC_X86_REG_RBP),
-            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));
+            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));*/
         throw std::runtime_error("emulation error: " + std::to_string(err));
     }
 
@@ -828,11 +833,14 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
 }
 
 uint64_t c_emulator_ctx::get_pc() const {
-    if (get_arch() == e_architecture::k_x86) {
-        return get_x86_reg_value(UC_X86_REG_EIP);
-    }
-
     switch (m_emulator->get_arch()) {
+        case e_architecture::k_x86: {
+            uint32_t eip;
+            uc_reg_read(m_uc, UC_X86_REG_EIP, &eip);
+
+            return eip;
+        }
+
         case e_architecture::k_amd64: {
             uint64_t rip;
             uc_reg_read(m_uc, UC_X86_REG_RIP, &rip);
@@ -847,14 +855,15 @@ uint64_t c_emulator_ctx::get_pc() const {
 }
 
 void c_emulator_ctx::set_pc(const uint64_t new_pc) const {
-    if (get_arch() == e_architecture::k_x86) {
-        set_x86_reg_value(UC_X86_REG_EIP, new_pc);
-        return;
-    }
-
     switch (m_emulator->get_arch()) {
         case e_architecture::k_amd64: {
             uc_reg_write(m_uc, UC_X86_REG_RIP, &new_pc);
+            break;
+        }
+
+        case e_architecture::k_x86: {
+            const auto eip = static_cast<uint32_t>(new_pc);
+            uc_reg_write(m_uc, UC_X86_REG_EIP, &eip);
             break;
         }
 
@@ -889,15 +898,18 @@ bool c_emulator_ctx::free_heap(const uint64_t address) const {
 
 uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t size, const uint32_t flags) const {
     const auto entry = m_heap_allocations.find(address);
+
     if (entry == m_heap_allocations.end() || size > 0xFFFFF000ULL) {
         return 0;
     }
 
-    const auto old = entry->second;
-    if (size <= old.m_capacity) {
-        if ((flags & 0x8) && size > old.m_size) {
-            const std::vector<uint8_t> zeros(static_cast<size_t>(size - old.m_size), 0);
-            if (uc_mem_write(m_uc, address + old.m_size, zeros.data(), zeros.size()) != UC_ERR_OK) {
+    const auto [entry_size, entry_capacity] = entry->second;
+
+    if (size <= entry_capacity) {
+        if (flags & 0x8 && size > entry_size) {
+            const std::vector<uint8_t> zeros(size - entry_size, 0);
+
+            if (uc_mem_write(m_uc, address + entry_size, zeros.data(), zeros.size()) != UC_ERR_OK) {
                 return 0;
             }
         }
@@ -910,7 +922,7 @@ uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t 
         return 0;
     }
 
-    std::vector<uint8_t> contents(old.m_size);
+    std::vector<uint8_t> contents(entry_size);
     if (!contents.empty() && uc_mem_read(m_uc, address, contents.data(), contents.size()) != UC_ERR_OK) {
         return 0;
     }
@@ -922,6 +934,7 @@ uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t 
 
     if ((!contents.empty() && uc_mem_write(m_uc, replacement, contents.data(), contents.size()) != UC_ERR_OK) ||
         !free_heap(address)) {
+        //
         free_heap(replacement);
         return 0;
     }
