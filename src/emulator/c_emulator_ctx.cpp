@@ -106,10 +106,11 @@ static bool dispatch_hook(uc_engine *uc, const uint64_t address, c_emulator_ctx*
         throw std::runtime_error("unexpected bp!");
     }
 
+    /*
     if (hook->m_name != "GetProcessHeap" && hook->m_name != "RtlFreeHeap" && hook->m_name != "RtlAllocateHeap" &&
         hook->m_name != "RtlReAllocateHeap") {
         printf("[+] calling %s from 0x%llX, ret addr 0x%llX...\n", hook->m_name.c_str(), address, ret_addr);
-    }
+    }*/
 
     const auto arg_count = hook->m_arg_count;
 
@@ -267,12 +268,10 @@ void c_emulator_ctx::set_file_sources(const std::string &input_name, const std::
 
 uint64_t c_emulator_ctx::open_file(const std::string &path) const {
     const auto file = m_file_sources.find(file_name(path));
-    if (file == m_file_sources.end()) {
-        return 0;
-    }
+    const auto data = file == m_file_sources.end() ? &get_original_file_mapping() : file->second;
 
     const auto handle = m_next_handle++;
-    m_file_handles.emplace(handle, s_file_handle{file->second, file->second->size(), 0, false});
+    m_file_handles.emplace(handle, s_file_handle{data, data->size(), 0, false});
     return handle;
 }
 
@@ -283,11 +282,15 @@ const c_emulator_ctx::s_file_handle* c_emulator_ctx::get_file_handle(const uint6
 
 uint64_t c_emulator_ctx::create_file_mapping(const uint64_t handle, const uint64_t size, const uint32_t protection) const {
     const auto file = get_file_handle(handle, false);
-    if (!file || !file->m_size || size > file->m_size) {
+
+    const auto data = file ? file->m_data : &get_original_file_mapping();
+    const auto file_size = file ? file->m_size : data->size();
+
+    if (!handle || !file_size || size > file_size) {
         return 0;
     }
 
-    const s_file_handle mapping{file->m_data, size ? size : file->m_size, protection, true};
+    const s_file_handle mapping{data, size ? size : file_size, protection, true};
     const auto mapping_handle = m_next_handle++;
     m_file_handles.emplace(mapping_handle, mapping);
     return mapping_handle;
@@ -810,11 +813,12 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
     err = emulate(start, end, 0);
 
     if (err != UC_ERR_OK /*&& err != UC_ERR_FETCH_PROT*/) {
+        /*
         printf("failed at 0x%llX , rsi - 0x%llX , rdi - 0x%llX , rax - 0x%llX , rbx - 0x%llX , r10 - 0x%llX, rbp - 0x%llX, r15 - 0x%llX, rcx - 0x%llX, r12 - 0x%llX\n",
             get_pc(),
             get_x86_reg_value(UC_X86_REG_RSI), get_x86_reg_value(UC_X86_REG_RDI), get_x86_reg_value(UC_X86_REG_RAX),
             get_x86_reg_value(UC_X86_REG_RBX), get_x86_reg_value(UC_X86_REG_R10), get_x86_reg_value(UC_X86_REG_RBP),
-            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));
+            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));*/
         throw std::runtime_error("emulation error: " + std::to_string(err));
     }
 

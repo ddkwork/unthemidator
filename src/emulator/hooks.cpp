@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <cstdio>
 
 #include "../unpacker/c_themida_unpacker.hpp"
 
@@ -57,7 +56,8 @@ namespace {
         uint32_t status = 0;
     };
 
-    s_file_view map_file_view(const c_emulator_ctx *ctx, const std::vector<uint8_t>& file, const uint64_t file_size, const uint64_t offset, uint64_t bytes) {
+    s_file_view map_file_view(const c_emulator_ctx *ctx, const std::vector<uint8_t>& file, const uint64_t file_size,
+        const uint64_t offset, uint64_t bytes) {
         if (offset >= file_size || file_size > file.size()) {
             return { .status = 0xC000000D }; // STATUS_INVALID_PARAMETER
         }
@@ -298,12 +298,13 @@ void hooks::create_file_mapping(const c_emulator_ctx *ctx) {
     const auto protection = static_cast<uint32_t>(ctx->get_arg(2));
     const auto size = (static_cast<uint64_t>(static_cast<uint32_t>(ctx->get_arg(3))) << 32) |
         static_cast<uint32_t>(ctx->get_arg(4));
+    const auto file_size = file ? file->m_size : ctx->get_original_file_mapping().size();
     uint32_t error = 0;
-    if (!file) {
+    if (!ctx->get_arg(0)) {
         error = 6;
-    } else if (!file->m_size) {
+    } else if (!file_size) {
         error = 1006;
-    } else if (size > file->m_size || (protection != 2 && protection != 4 && protection != 8 &&
+    } else if (size > file_size || (protection != 2 && protection != 4 && protection != 8 &&
         protection != 0x20 && protection != 0x40 && protection != 0x80)) {
         error = 87;
     }
@@ -408,8 +409,6 @@ void hooks::virtual_protect(const c_emulator_ctx *ctx) {
     const auto new_prot = static_cast<uint32_t>(ctx->get_arg(2));
     const auto old_prot_ptr = ctx->get_arg(3);
 
-    printf("[+] virtual protect: base=0x%llX, size=0x%X, new_prot=0x%X...\n", address, size, new_prot); // fixme : remove
-
     handle_virtual_protection(ctx, address, size, new_prot, old_prot_ptr);
     ctx->set_result(1);
 }
@@ -427,57 +426,57 @@ void hooks::map_view_of_file(const c_emulator_ctx *ctx) {
     const auto handle = ctx->get_arg(0);
     const auto mapping = ctx->get_file_handle(handle, true);
     const auto access = static_cast<uint32_t>(ctx->get_arg(1));
-    const auto offset = (static_cast<uint64_t>(static_cast<uint32_t>(ctx->get_arg(2))) << 32) |
-        static_cast<uint32_t>(ctx->get_arg(3));
     const auto bytes = ctx->get_arg(4);
 
-    if (!mapping || offset & 0xFFFF) {
-        write_last_error(ctx, !mapping ? 6 : 1132);
+    const auto offset = (static_cast<uint64_t>(static_cast<uint32_t>(ctx->get_arg(2))) << 32) |
+        static_cast<uint32_t>(ctx->get_arg(3));
+
+    if (!handle || offset & 0xFFFF) {
+        write_last_error(ctx, !handle ? 6 : 1132);
         ctx->set_result(0);
         return;
     }
 
-    const bool writable = mapping->m_protection == 4 || mapping->m_protection == 0x40;
-    const bool executable = mapping->m_protection >= 0x20;
-    if (((access & 2) && !writable) || ((access & 0x20) && !executable)) {
+    const bool writable = !mapping || mapping->m_protection == 4 || mapping->m_protection == 0x40;
+    const bool executable = !mapping || mapping->m_protection >= 0x20;
+
+    if ((access & 2 && !writable) || (access & 0x20 && !executable)) {
         write_last_error(ctx, 5);
+
         ctx->set_result(0);
         return;
     }
 
-    printf("[unthemidator][runtime] MapViewOfFile: handle=0x%llX offset=0x%llX size=0x%llX\n",
-        handle, offset, bytes);
+    const auto &file = mapping ? *mapping->m_data : ctx->get_original_file_mapping();
+    const auto file_size = mapping ? mapping->m_size : file.size();
 
-    const auto view = map_file_view(ctx, *mapping->m_data, mapping->m_size, offset, bytes);
-    if (view.status) {
-        write_last_error(ctx, view.status == 0xC0000005 ? 998 : 87);
+    const auto [base, size, status] = map_file_view(ctx, file, file_size, offset, bytes);
+
+    if (status) {
+        write_last_error(ctx, status == 0xC0000005 ? 998 : 87);
         ctx->set_result(0);
         return;
     }
 
-    const uint32_t protection = UC_PROT_READ | ((access & 3) ? UC_PROT_WRITE : 0) |
-        ((access & 0x20) ? UC_PROT_EXEC : 0);
-    if (uc_mem_protect(ctx->get_uc(), view.base, view.size, protection) != UC_ERR_OK) {
-        ctx->free_storage(view.base);
+    if (uc_mem_protect(ctx->get_uc(), base, size, UC_PROT_READ | (access & 3 ? UC_PROT_WRITE : 0) |
+        (access & 0x20 ? UC_PROT_EXEC : 0)) != UC_ERR_OK) {
+        //
+        ctx->free_storage(base);
         write_last_error(ctx, 998);
+
         ctx->set_result(0);
         return;
     }
 
-    ctx->set_result(view.base);
+    ctx->set_result(base);
 }
 
 void hooks::get_file_size(const c_emulator_ctx *ctx) {
     const auto file_size_high_ptr = ctx->get_arg(1);
 
     const auto file = ctx->get_file_handle(ctx->get_arg(0), false);
-    if (!file) {
-        write_last_error(ctx, 6);
-        ctx->set_result(UINT32_MAX);
-        return;
-    }
 
-    const auto file_size = file->m_size;
+    const auto file_size = file ? file->m_size : ctx->get_original_file_mapping().size();
     const auto file_size_low = static_cast<uint32_t>(file_size);
 
     if (const auto file_size_high = static_cast<uint32_t>(file_size >> 32); file_size_high_ptr &&
@@ -489,8 +488,9 @@ void hooks::get_file_size(const c_emulator_ctx *ctx) {
     }
 
     if (file_size_low == UINT32_MAX) {
-        write_last_error(ctx, 0); // Distinguish a valid size from INVALID_FILE_SIZE.
+        write_last_error(ctx, 0); // Distinguish a valid size from INVALID_FILE_SIZE
     }
+
     ctx->set_result(file_size_low);
 }
 
