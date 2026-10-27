@@ -101,7 +101,7 @@ void c_themida_unpacker::decompress_bin() {
     decompressed_dump.resize(m_memory_manager->get_image_size());
 
     const auto last_err = uc_mem_read(m_emulator_ctx->get_uc(), m_memory_manager->get_image_base(), decompressed_dump.data(),
-                                      decompressed_dump.size());
+        decompressed_dump.size());
 
     if (last_err != UC_ERR_OK) {
         throw std::runtime_error("decompress bin: failed to read emulator memory: " + std::to_string(last_err));
@@ -173,15 +173,37 @@ void c_themida_unpacker::startup() {
 
     const auto image_base = m_memory_manager->get_image_base();
     const auto image_end = image_base + m_memory_manager->get_image_size();
+    const auto boot_entry_addr = image_base + m_pe_image->get_entry_rva();
 
     auto pc = m_emulator_ctx->get_pc();
 
+    // assume all executable sections can contain OEP, except for sections that have already
+    // been processed (almost always would be the VM section and boot section)
+    for (const auto &section : m_pe_image->get_sections()) {
+        const auto section_base = image_base + section.virtual_address;
+
+        if (!(section.characteristics & unthemidator::pe::k_scn_mem_execute)) {
+            continue;
+        }
+
+        if ((m_real_entry_address >= section_base && m_real_entry_address < section_base + section.virtual_size) ||
+            (boot_entry_addr >= section_base && boot_entry_addr < section_base + section.virtual_size)) {
+            //
+            continue;
+        }
+
+        uc_mem_protect(m_emulator_ctx->get_uc(), section_base, page_up(section.virtual_size, 0x1000),
+            UC_PROT_READ | UC_PROT_WRITE);
+    }
+
     m_emulator_ctx->add_mem_hook(UC_HOOK_MEM_FETCH_PROT,
         [this](uc_engine*, uc_mem_type, const uint64_t address, int, int64_t) {
-            if (!m_emulator_ctx->get_hook(address)) {
-                on_first_vm_enter(address);
-                m_emulator_ctx->return_from_call(3);
+            if (m_emulator_ctx->get_hook(address)) {
+                return;
             }
+
+            on_first_vm_enter(address);
+            m_emulator_ctx->return_from_call(3);
         }, image_base, image_end - 1);
 
     if (m_options.m_max_nested_vms > 0) {
@@ -424,7 +446,8 @@ void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
 
     m_called_addresses.push_back(called_address);
 
-    std::cout << "[unthemidator][runtime] entry called - 0x" << std::hex << called_address << std::dec << std::endl;
+    std::cout << "[unthemidator][runtime] executed callback/EP - 0x" <<
+        std::hex << called_address << std::dec << std::endl;
 }
 
 void c_themida_unpacker::initialize_runtime_regions() {
