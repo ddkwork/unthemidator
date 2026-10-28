@@ -26,7 +26,7 @@ namespace {
     static_assert(sizeof(s_system_time) == 16);
     static_assert(sizeof(s_file_time) == 8);
 
-    void write_last_error(const c_emulator_ctx *ctx, const uint32_t error) {
+    void write_last_error(c_emulator_ctx *ctx, const uint32_t error) {
         if (const auto teb = ctx->get_memory()->get_address_by_tag("TEB").value();
             !ctx->write<uint32_t>(teb + (ctx->get_arch() == e_architecture::k_x86 ? 0x34 : 0x68), error)) {
             //
@@ -64,7 +64,7 @@ namespace {
     static_assert(sizeof(adapter_info<uint64_t>) == 704);
 }
 
-void hooks::get_local_time(const c_emulator_ctx *ctx) {
+void hooks::get_local_time(c_emulator_ctx *ctx) {
     const auto now = std::chrono::system_clock::now();
     const auto seconds = floor<std::chrono::seconds>(now);
     const auto timestamp = std::chrono::system_clock::to_time_t(seconds);
@@ -98,7 +98,7 @@ void hooks::get_local_time(const c_emulator_ctx *ctx) {
     }
 }
 
-void hooks::system_time_to_file_time(const c_emulator_ctx *ctx) {
+void hooks::system_time_to_file_time(c_emulator_ctx *ctx) {
     const auto time = ctx->read<s_system_time>(ctx->get_arg(0));
 
     if (!time) {
@@ -122,10 +122,10 @@ void hooks::system_time_to_file_time(const c_emulator_ctx *ctx) {
 
     using namespace std::chrono;
 
-    using ticks = duration<uint64_t, std::ratio<1, 10'000'000>>;
+    using ticks = duration<uint64_t, std::ratio<1, 10'000'000> >;
     const auto value = std::chrono::duration_cast<ticks>(sys_days{date} - sys_days{1601y / January / 1} +
-        hours{time->m_hour} + minutes{time->m_minute} + seconds{time->m_second} +
-        milliseconds{time->m_milliseconds}).count();
+                                                         hours{time->m_hour} + minutes{time->m_minute} + seconds{time->m_second} +
+                                                         milliseconds{time->m_milliseconds}).count();
 
     if (const s_file_time file_time{static_cast<uint32_t>(value), static_cast<uint32_t>(value >> 32)};
         !ctx->write(ctx->get_arg(1), file_time)) {
@@ -139,7 +139,7 @@ void hooks::system_time_to_file_time(const c_emulator_ctx *ctx) {
     ctx->set_result(1);
 }
 
-void hooks::get_adapters_info(const c_emulator_ctx *ctx) {
+void hooks::get_adapters_info(c_emulator_ctx *ctx) {
     const auto buffer = ctx->get_arg(0);
     const auto length_pointer = ctx->get_arg(1);
     const auto length = ctx->read<uint32_t>(length_pointer);
@@ -167,6 +167,7 @@ void hooks::get_adapters_info(const c_emulator_ctx *ctx) {
         std::memcpy(adapter.ip.mask, "255.255.255.0", sizeof("255.255.255.0"));
         std::memcpy(adapter.gateway.address, "192.168.1.1", sizeof("192.168.1.1"));
         std::memcpy(adapter.gateway.mask, "0.0.0.0", sizeof("0.0.0.0"));
+
         ctx->set_result(ctx->write(buffer, adapter) ? 0 : 87);
     };
 
@@ -184,28 +185,43 @@ void hooks::sh_get_special_folder_path_w(const c_emulator_ctx *ctx) {
 
     std::u16string path;
     switch (csidl) {
-        case 0x00: case 0x10: path = u"C:\\Users\\User\\Desktop"; break;
-        case 0x05: path = u"C:\\Users\\User\\Documents"; break;
-        case 0x1A: path = u"C:\\Users\\User\\AppData\\Roaming"; break;
-        case 0x1C: path = u"C:\\Users\\User\\AppData\\Local"; break;
-        case 0x23: path = u"C:\\ProgramData"; break;
-        case 0x24: path = u"C:\\Windows"; break;
-        case 0x25: path = x86 ? u"C:\\Windows\\SysWOW64" : u"C:\\Windows\\System32"; break;
-        case 0x26: path = x86 ? u"C:\\Program Files (x86)" : u"C:\\Program Files"; break;
-        case 0x28: path = u"C:\\Users\\User"; break;
-        case 0x29: path = u"C:\\Windows\\SysWOW64"; break;
-        case 0x2A: path = u"C:\\Program Files (x86)"; break;
-        case 0x2B: path = x86 ? u"C:\\Program Files (x86)\\Common Files" : u"C:\\Program Files\\Common Files"; break;
-        case 0x2C: path = u"C:\\Program Files (x86)\\Common Files"; break;
-        default: ctx->set_result(0); return;
+        case 0x00:
+        case 0x10: path = u"C:\\Users\\User\\Desktop";
+            break;
+        case 0x05: path = u"C:\\Users\\User\\Documents";
+            break;
+        case 0x1A: path = u"C:\\Users\\User\\AppData\\Roaming";
+            break;
+        case 0x1C: path = u"C:\\Users\\User\\AppData\\Local";
+            break;
+        case 0x23: path = u"C:\\ProgramData";
+            break;
+        case 0x24: path = u"C:\\Windows";
+            break;
+        case 0x25: path = x86 ? u"C:\\Windows\\SysWOW64" : u"C:\\Windows\\System32";
+            break;
+        case 0x26: path = x86 ? u"C:\\Program Files (x86)" : u"C:\\Program Files";
+            break;
+        case 0x28: path = u"C:\\Users\\User";
+            break;
+        case 0x29: path = u"C:\\Windows\\SysWOW64";
+            break;
+        case 0x2A: path = u"C:\\Program Files (x86)";
+            break;
+        case 0x2B: path = x86 ? u"C:\\Program Files (x86)\\Common Files" : u"C:\\Program Files\\Common Files";
+            break;
+        case 0x2C: path = u"C:\\Program Files (x86)\\Common Files";
+            break;
+        default: ctx->set_result(0);
+            return;
     }
 
     const auto bytes = (path.size() + 1) * sizeof(char16_t);
     ctx->set_result(output && !c_memory::overlaps_shared_data(output, bytes) &&
-        uc_mem_write(ctx->get_uc(), output, path.c_str(), bytes) == UC_ERR_OK);
+                    uc_mem_write(ctx->get_uc(), output, path.c_str(), bytes) == UC_ERR_OK);
 }
 
-void hooks::get_volume_information_a(const c_emulator_ctx *ctx) {
+void hooks::get_volume_information_a(c_emulator_ctx *ctx) {
     constexpr char volume_name[] = "Local Disk";
     constexpr char file_system[] = "NTFS";
 
@@ -254,4 +270,3 @@ void hooks::get_module_filename(const c_emulator_ctx *ctx) {
 
     ctx->set_result(path.length() * sizeof(char16_t) + 2);
 }
-

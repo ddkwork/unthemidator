@@ -21,6 +21,7 @@ public:
     void decompress_vms();
 
     [[nodiscard]] uint32_t get_oep_rva() const;
+    [[nodiscard]] const std::vector<uint64_t>& get_tls_callbacks() const { return m_called_addresses; }
     [[nodiscard]] const std::vector<s_themida_recovered_import>& get_recovered_imports() const;
     [[nodiscard]] const std::vector<s_themida_vm_trampoline>& get_vm_trampolines() const { return m_vm_trampolines; }
 
@@ -31,10 +32,10 @@ public:
     // helper functions, for internal use
     void on_region_save(uint64_t address, uint32_t size);
     void on_region_made_writable(uint64_t address, uint32_t size);
-    void on_first_vm_enter(uint64_t address);
+    void on_original_pe_callback(uint64_t address);
     void on_thread_create(uint64_t address, uint64_t param) const;
-    [[nodiscard]] bool should_stop(uint64_t address) const;
 private:
+    void initialize_runtime_regions();
     [[nodiscard]] static bool preserves_entry_flags(const c_intel_function &function);
     [[nodiscard]] bool is_vm_enter(uint64_t address, std::shared_ptr<c_intel_function> disassembled);
     [[nodiscard]] std::shared_ptr<s_themida_vm_handler> discover_vm_handler(uint64_t address);
@@ -58,13 +59,15 @@ private:
 
     std::vector<s_themida_vm_trampoline> m_vm_trampolines{};
 
+    // ordered startup calls (TLS callbacks on Windows), startup removes the last address and uses it as OEP
+    std::vector<uint64_t> m_called_addresses{};
+
     uint64_t m_real_entry_address = 0;
 
 	s_unpacker_options m_options;
 
     bool m_is_multi_vm = false;
     bool m_is_v4 = false;
-    bool m_found_oep = false;
 
     std::optional<std::pair<uint64_t, uint64_t>> m_loader_region = std::nullopt;
 

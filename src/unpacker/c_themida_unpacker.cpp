@@ -3,11 +3,12 @@
 #include <algorithm>
 #include <iostream>
 #include <chrono>
-#include <fstream>
 #include <ranges>
 
 #include "../emulator/hooks.hpp"
 #include "../pe/pe_structs.hpp"
+
+#undef max
 
 c_themida_unpacker::c_themida_unpacker(const s_unpacker_options options, const std::shared_ptr<c_pe_image> &pe_image,
     const std::shared_ptr<c_emulator_ctx> &emulator_ctx, const std::shared_ptr<c_memory_manager> &memory_manager)
@@ -100,7 +101,7 @@ void c_themida_unpacker::decompress_bin() {
     decompressed_dump.resize(m_memory_manager->get_image_size());
 
     const auto last_err = uc_mem_read(m_emulator_ctx->get_uc(), m_memory_manager->get_image_base(), decompressed_dump.data(),
-                                      decompressed_dump.size());
+        decompressed_dump.size());
 
     if (last_err != UC_ERR_OK) {
         throw std::runtime_error("decompress bin: failed to read emulator memory: " + std::to_string(last_err));
@@ -130,8 +131,39 @@ void c_themida_unpacker::startup() {
 
     m_vm_handlers.emplace(m_real_entry_address, vm_enter);
 
+    // add return address so we know where execution ends
+    const auto is_x86 = m_emulator_ctx->get_arch() == e_architecture::k_x86;
+    const auto sp_reg = is_x86 ? UC_X86_REG_ESP : UC_X86_REG_RSP;
+    const auto original_sp = m_emulator_ctx->get_x86_reg_value(sp_reg);
+    const auto return_address = m_emulator_ctx->allocate_storage(0x1000, "startup_return");
+
+    if (!m_emulator_ctx->write<uint8_t>(return_address, 0xCC)) {
+        throw std::runtime_error("startup: failed to initialize return address");
+    }
+
+    m_emulator_ctx->add_hook(return_address, "startup_return", [return_address](c_emulator_ctx* ctx) {
+        ctx->stop(return_address);
+    });
+
+    const auto entry_sp = is_x86 ? original_sp - 0x10 : (original_sp & ~0xFULL) - 0x28;
+    m_emulator_ctx->set_x86_reg_value(sp_reg, entry_sp);
+
+    if (!(is_x86 ? m_emulator_ctx->write<uint32_t>(entry_sp, static_cast<uint32_t>(return_address)) :
+        m_emulator_ctx->write<uint64_t>(entry_sp, return_address))) {
+        throw std::runtime_error("startup: failed to write entry return address");
+    }
+
+    // initialize entrypoint call arguments (assume default dll entry signature)
+    m_emulator_ctx->set_arg(0, m_memory_manager->get_image_base());
+    m_emulator_ctx->set_arg(1, 1); // DLL_PROCESS_ATTACH
+    m_emulator_ctx->set_arg(2, 0);
+
     // try running vm enter
     if (!run_vm_entry_setup(m_real_entry_address)) {
+        m_emulator_ctx->remove_hook(return_address);
+        m_emulator_ctx->free_storage(return_address);
+        m_emulator_ctx->set_x86_reg_value(sp_reg, original_sp);
+
         std::cout << "[unthemidator] no themida runtime was found" << std::endl;
         return;
     }
@@ -141,50 +173,119 @@ void c_themida_unpacker::startup() {
 
     const auto image_base = m_memory_manager->get_image_base();
     const auto image_end = image_base + m_memory_manager->get_image_size();
+    const auto boot_entry_addr = image_base + m_pe_image->get_entry_rva();
 
     auto pc = m_emulator_ctx->get_pc();
 
-    // add image-wide memory callback to log NX pages execution attempt to catch non-virtualized OEP
+    // assume all executable sections can contain OEP, except for sections that have already
+    // been processed (almost always would be the VM section and boot section)
+    for (const auto &section : m_pe_image->get_sections()) {
+        const auto section_base = image_base + section.virtual_address;
+
+        if (!(section.characteristics & unthemidator::pe::k_scn_mem_execute)) {
+            continue;
+        }
+
+        if ((m_real_entry_address >= section_base && m_real_entry_address < section_base + section.virtual_size) ||
+            (boot_entry_addr >= section_base && boot_entry_addr < section_base + section.virtual_size)) {
+            //
+            continue;
+        }
+
+        uc_mem_protect(m_emulator_ctx->get_uc(), section_base, page_up(section.virtual_size, 0x1000),
+            UC_PROT_READ | UC_PROT_WRITE);
+    }
+
     m_emulator_ctx->add_mem_hook(UC_HOOK_MEM_FETCH_PROT,
-        [&](uc_engine*, const uc_mem_type, const uint64_t addr, const int, const int64_t) -> void {
-            m_found_oep = true;
-            m_real_entry_address = addr;
+        [this](uc_engine*, uc_mem_type, const uint64_t address, int, int64_t) {
+            //
+            if (m_emulator_ctx->get_hook(address)) {
+                return;
+            }
 
-            on_first_vm_enter(addr);
-            m_emulator_ctx->remove_mem_hook(image_base);
+            on_original_pe_callback(address);
+            m_emulator_ctx->return_from_call(3);
+        }, image_base, image_end - 1);
 
-        }, image_base, image_end);
+    // catch emulation exceptions to prevent throwing after OEP is discovered cause
+    // stack corruption is possible after the OEP call (if OEP is non-returning for example,
+    // since we assume all OEPs return)
+    try {
+        if (m_options.m_max_nested_vms > 0) {
 
-    if (m_options.m_max_nested_vms > 0) {
-        while (true) {
-            pc = m_emulator_ctx->get_pc();
+            while (true) {
+                pc = m_emulator_ctx->get_pc();
 
-            // if current RIP is not within the image, single step until a hook as fired or any other kind of magic happens
-            if (pc < image_base || pc >= image_end) {
-                m_emulator_ctx->single_step();
-
-                if (m_found_oep) {
+                if (pc == return_address || m_emulator_ctx->is_stopped()) {
                     break;
                 }
 
-                continue;
-            }
+                // if current RIP is not within the image, single step until a hook as fired or any other kind of magic happens
+                if (pc < image_base || pc >= image_end) {
+                    m_emulator_ctx->single_step();
 
-            run_virtual_instruction(pc);
+                    if (m_emulator_ctx->is_stopped() || m_emulator_ctx->get_pc() == return_address ||
+                        m_emulator_ctx->get_pc() == 0) {
+                        //
+                        break;
+                    }
 
-            // nothing left to run if OEP has been found already
-            if (m_found_oep || m_emulator_ctx->get_pc() == 0) {
-                break;
+                    continue;
+                }
+
+                run_virtual_instruction(pc);
+
+                if (m_emulator_ctx->is_stopped() || m_emulator_ctx->get_pc() == return_address ||
+                    m_emulator_ctx->get_pc() == 0) {
+                    //
+                    break;
+                }
             }
+        } else {
+            m_emulator_ctx->run(pc, return_address);
         }
-    } else {
-        m_emulator_ctx->run(pc, 0);
+    } catch (std::runtime_error &) {
+        // only throw if there are no OEP candidates
+        if (m_called_addresses.empty()) {
+            throw;
+        }
     }
 
     m_emulator_ctx->remove_mem_hook(image_base);
 
+    m_emulator_ctx->remove_hook(return_address);
+    m_emulator_ctx->free_storage(return_address);
+    m_emulator_ctx->set_x86_reg_value(sp_reg, original_sp);
+
+    if (m_called_addresses.empty()) {
+        throw std::runtime_error("failed to find startup entry calls");
+    }
+
+    m_real_entry_address = m_called_addresses.back();
+    m_called_addresses.pop_back();
+
+    std::cout << "[unthemidator][runtime] OEP found - 0x" << std::hex << m_real_entry_address << std::dec << std::endl;
+
+    // restore vm enters' prologues after TLS callbacks and OEP lookup end
+    for (const auto &trampoline : m_vm_trampolines) {
+        if (trampoline.m_prologue.empty()) {
+            continue;
+        }
+
+        // restore prologue
+        uc_mem_write(m_emulator_ctx->get_uc(), trampoline.m_vm_enter_address, trampoline.m_prologue.data(),
+            trampoline.m_prologue.size());
+
+        m_memory_manager->write_memory(trampoline.m_vm_enter_address, trampoline.m_prologue);
+
+        // remove hook
+        m_emulator_ctx->remove_hook(trampoline.m_vm_enter_address);
+    }
+
     // recover imports (IAT) pointers
     if (!m_options.m_skip_imports) {
+        m_emulator_ctx->set_stop_on_import(true);
+
         for (const auto addr: m_updated_pointers | std::views::keys) {
             if (addr <= image_base + m_pe_image->get_size_of_headers()) {
                 continue;
@@ -194,6 +295,8 @@ void c_themida_unpacker::startup() {
                 continue;
             }
         }
+
+        m_emulator_ctx->set_stop_on_import(false);
     }
 
     std::ranges::sort(m_recovered_imports, {}, &s_themida_recovered_import::m_iat_rva);
@@ -302,9 +405,9 @@ void c_themida_unpacker::on_region_save(const uint64_t address, const uint32_t s
 
 void c_themida_unpacker::on_region_made_writable(const uint64_t address, const uint32_t size) {
     const auto image_base = m_memory_manager->get_image_base();
-    const auto image_size = m_memory_manager->get_image_size();
+    const auto image_end = image_base + m_memory_manager->get_image_size();
 
-    if (address < image_base || address - image_base >= image_size || !size || size > image_size - (address - image_base)) {
+    if (address < image_base || address >= image_end || !size || size > image_end - image_base) {
         return;
     }
 
@@ -338,36 +441,27 @@ void c_themida_unpacker::on_region_made_writable(const uint64_t address, const u
     }, address, address + region_size - 1);
 }
 
-void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
-    // fixme: this assumes that the first call to the .text section is OEP,
-    //  which is not always the case, for example TLS callbacks go first
-    m_emulator_ctx->stop(address);
-
-    // restore vm enters' prologues
-    for (const auto &trampoline : m_vm_trampolines) {
-        // restore prologue
-        uc_mem_write(m_emulator_ctx->get_uc(), trampoline.m_vm_enter_address, trampoline.m_prologue.data(),
-            trampoline.m_prologue.size());
-
-        // remove hook
-        m_emulator_ctx->remove_hook(trampoline.m_vm_enter_address);
-    }
+void c_themida_unpacker::on_original_pe_callback(const uint64_t address) {
+    auto called_address = address;
 
     for (const auto &trampoline : m_vm_trampolines) {
         if (trampoline.m_vm_enter_address == address) {
-            m_real_entry_address = trampoline.m_trampoline_address;
-
-            m_found_oep = true;
+            called_address = trampoline.m_trampoline_address;
             break;
         }
     }
 
-    if (!m_found_oep) {
-        throw std::runtime_error("failed to find OEP");
+    if (m_called_addresses.empty()) {
+        initialize_runtime_regions();
     }
 
-    std::cout << "[unthemidator][runtime] OEP found - 0x" << std::hex << m_real_entry_address << std::dec << std::endl;
+    m_called_addresses.push_back(called_address);
 
+    std::cout << "[unthemidator][runtime] executed callback/EP - 0x" <<
+        std::hex << called_address << std::dec << std::endl;
+}
+
+void c_themida_unpacker::initialize_runtime_regions() {
     // bypass loader anti-dump by manually fixing some pointers
     if (m_loader_region.has_value()) {
         std::vector<uint8_t> loader(m_loader_region->second - m_loader_region->first, 0);
@@ -463,10 +557,6 @@ std::string c_themida_unpacker::get_themida_version() const {
     }
 
     return "v3.0 - v3.1.9.0";
-}
-
-bool c_themida_unpacker::should_stop([[maybe_unused]] const uint64_t address) const {
-    return m_found_oep;
 }
 
 bool c_themida_unpacker::preserves_entry_flags(const c_intel_function &function) {
@@ -817,7 +907,7 @@ bool c_themida_unpacker::recover_import(const uint64_t entry_address) {
     const auto *known_fn = m_emulator_ctx->get_imports()->find_import_by_address(final_value);
 
     if (!known_fn) {
-        if (final_value < m_loader_region->first || final_value >= m_loader_region->second) {
+        if (!m_loader_region || final_value < m_loader_region->first || final_value >= m_loader_region->second) {
             return false;
         }
 
@@ -836,8 +926,7 @@ bool c_themida_unpacker::recover_import(const uint64_t entry_address) {
             return false;
         }
 
-        // if the import address is obfuscated, emulate the call until the int3 instruction
-        // we already have breakpoints set on all potential addresses
+        // run the stub until it reaches a known import, without executing the API hook
         try {
             m_emulator_ctx->run(final_value, 0);
         } catch (...) {

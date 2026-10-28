@@ -7,7 +7,6 @@
 #include "windows.hpp"
 
 #include "../memory/c_memory_manager.hpp"
-#include "../pe/c_pe_image.hpp"
 #include "../unpacker/c_themida_unpacker.hpp"
 
 #undef min
@@ -87,16 +86,16 @@ static int cpuid_callback(uc_engine *uc, void*) {
 }
 
 static bool dispatch_hook(uc_engine *uc, const uint64_t address, c_emulator_ctx* ctx) {
-    const auto hook = ctx->get_hook(address);
-
-    if (ctx->get_themida_unpacker() && ctx->get_themida_unpacker()->should_stop(address)) {
+    if (ctx->stops_on_import() && ctx->get_imports()->find_import_by_address(address)) {
         ctx->stop(address);
-
         return false;
     }
 
+    const auto hook = ctx->get_hook(address);
+
     const auto is_x86 = ctx->get_arch() == e_architecture::k_x86;
     const auto sp_reg = is_x86 ? UC_X86_REG_ESP : UC_X86_REG_RSP;
+
     auto sp = ctx->get_x86_reg_value(sp_reg);
     const auto ret_addr = is_x86 ? ctx->read<uint32_t>(sp).value() : ctx->read<uint64_t>(sp).value();
 
@@ -128,6 +127,7 @@ static bool dispatch_hook(uc_engine *uc, const uint64_t address, c_emulator_ctx*
 
     ctx->set_x86_reg_value(sp_reg, sp);
     ctx->set_pc(ret_addr);
+
     return true;
 }
 
@@ -148,8 +148,12 @@ static void syscall_callback(uc_engine *uc, void*) {
 }
 
 bool c_emulator_ctx::fetch_prot_callback(uc_engine *uc, uc_mem_type, const uint64_t address, int, int64_t, c_emulator_ctx* ctx) {
-    if (!ctx->get_hook(address) &&
-        !(ctx->get_themida_unpacker() && ctx->get_themida_unpacker()->should_stop(address))) {
+    if (ctx->m_stop_on_import && ctx->m_imports->find_import_by_address(address)) {
+        ctx->stop(address);
+        return false;
+    }
+
+    if (!ctx->get_hook(address)) {
         return false;
     }
 
@@ -248,12 +252,14 @@ namespace {
 
 void c_emulator_ctx::set_file_sources(const std::string &input_name, const std::string &license_name,
     std::vector<uint8_t> license) {
+    //
     if (!m_file_handles.empty()) {
         throw std::runtime_error("emulator ctx: file sources are already in use");
     }
 
     const auto input = file_name(input_name);
     const auto license_file = file_name(license_name);
+
     if (input.empty() || (!license_name.empty() && (license_file.empty() || license_file == input))) {
         throw std::runtime_error("emulator ctx: input and license filenames must be distinct");
     }
@@ -261,26 +267,28 @@ void c_emulator_ctx::set_file_sources(const std::string &input_name, const std::
     m_file_sources.clear();
     m_license_file = std::move(license);
     m_file_sources.emplace(input, &get_original_file_mapping());
+
     if (!license_name.empty()) {
         m_file_sources.emplace(license_file, &m_license_file);
     }
 }
 
-uint64_t c_emulator_ctx::open_file(const std::string &path) const {
+uint64_t c_emulator_ctx::open_file(const std::string &path) {
     const auto file = m_file_sources.find(file_name(path));
     const auto data = file == m_file_sources.end() ? &get_original_file_mapping() : file->second;
 
     const auto handle = m_next_handle++;
     m_file_handles.emplace(handle, s_file_handle{data, data->size(), 0, false});
+
     return handle;
 }
 
-const c_emulator_ctx::s_file_handle* c_emulator_ctx::get_file_handle(const uint64_t handle, const bool mapping) const {
+const c_emulator_ctx::s_file_handle* c_emulator_ctx::get_file_handle(const uint64_t handle, const bool mapping) {
     const auto file = m_file_handles.find(handle);
     return file == m_file_handles.end() || file->second.m_is_mapping != mapping ? nullptr : &file->second;
 }
 
-uint64_t c_emulator_ctx::create_file_mapping(const uint64_t handle, const uint64_t size, const uint32_t protection) const {
+uint64_t c_emulator_ctx::create_file_mapping(const uint64_t handle, const uint64_t size, const uint32_t protection) {
     const auto file = get_file_handle(handle, false);
 
     const auto data = file ? file->m_data : &get_original_file_mapping();
@@ -292,11 +300,13 @@ uint64_t c_emulator_ctx::create_file_mapping(const uint64_t handle, const uint64
 
     const s_file_handle mapping{data, size ? size : file_size, protection, true};
     const auto mapping_handle = m_next_handle++;
+
     m_file_handles.emplace(mapping_handle, mapping);
+
     return mapping_handle;
 }
 
-bool c_emulator_ctx::close_file_handle(const uint64_t handle) const {
+bool c_emulator_ctx::close_file_handle(const uint64_t handle) {
     return m_file_handles.erase(handle) != 0;
 }
 
@@ -329,7 +339,7 @@ uint64_t c_emulator_ctx::get_arg(const uint32_t index) const {
     return read<uint64_t>(get_x86_reg_value(UC_X86_REG_RSP) + 8ULL * (index + 1ULL)).value();
 }
 
-void c_emulator_ctx::set_arg(const uint32_t index, const uint64_t value) const {
+void c_emulator_ctx::set_arg(const uint32_t index, const uint64_t value) {
     if (get_arch() == e_architecture::k_x86) {
         if (!write<uint32_t>(get_x86_reg_value(UC_X86_REG_ESP) + 4ULL * (index + 1ULL),
             static_cast<uint32_t>(value))) {
@@ -358,6 +368,7 @@ void c_emulator_ctx::set_result(const uint64_t value) const {
 
 void c_emulator_ctx::add_hook(const uint64_t address, const std::string& name,
     const std::function<void(c_emulator_ctx *)> &hook, const uint32_t arg_count) {
+    //
     m_hooks.emplace(address, s_hooked_function{
         .m_address = address,
         .m_name = name,
@@ -380,6 +391,7 @@ void c_emulator_ctx::add_mem_hook(const uc_hook_type hook_type, std::function<me
 
     const auto trampoline = hook_type & UC_HOOK_MEM_INVALID ?
         reinterpret_cast<void*>(mem_fault_callback) : reinterpret_cast<void*>(mem_callback);
+
     uc_hook_add(m_uc, &m_mem_hooks.at(start_address).m_trace, hook_type, trampoline,
         reinterpret_cast<void*>(&m_mem_hooks.at(start_address).m_hook), start_address, end_address);
 }
@@ -421,6 +433,7 @@ void c_emulator_ctx::raise_exception(const uint32_t exception_code) {
     constexpr uint64_t k_pointers_offset = 0xA0;
     constexpr uint64_t k_context_offset = 0x100;
     constexpr size_t k_context_size = 0x4D0;
+
     const auto context_size = is_x86 ? 0x2CC : k_context_size;
 
     uc_context *saved = nullptr;
@@ -604,7 +617,7 @@ void c_emulator_ctx::raise_exception(const uint32_t exception_code) {
     }
 }
 
-void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, const uint64_t param) const {
+void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, const uint64_t param) {
     uc_context *saved = nullptr;
 
     if (uc_context_alloc(m_uc, &saved) != UC_ERR_OK) {
@@ -632,11 +645,6 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
         if (const auto err = emulate(address, end, 0); err != UC_ERR_OK) {
             throw std::runtime_error("thread emulation failed: " + std::to_string(err));
         }
-
-        if (!m_stop_requested && get_pc() != end) {
-            // todo: is it necessary? threads can exit early, not necessarily a bad thing? research me!
-            // throw std::runtime_error("thread emulation stopped before its end address");
-        }
     } catch (...) {
         m_hook_resume = hook_resume;
 
@@ -662,7 +670,7 @@ void c_emulator_ctx::run_thread(const uint64_t address, const uint64_t end, cons
     }
 }
 
-uint64_t c_emulator_ctx::create_process_snapshot(const uint32_t flags, const uint32_t process_id) const {
+uint64_t c_emulator_ctx::create_process_snapshot(const uint32_t flags, const uint32_t process_id) {
     const auto handle = m_next_handle++;
 
     m_process_snapshots.emplace(handle, s_process_snapshot{
@@ -673,12 +681,12 @@ uint64_t c_emulator_ctx::create_process_snapshot(const uint32_t flags, const uin
     return handle;
 }
 
-c_emulator_ctx::s_process_snapshot* c_emulator_ctx::get_process_snapshot(const uint64_t handle) const {
+c_emulator_ctx::s_process_snapshot* c_emulator_ctx::get_process_snapshot(const uint64_t handle) {
     const auto it = m_process_snapshots.find(handle);
     return it == m_process_snapshots.end() ? nullptr : &it->second;
 }
 
-bool c_emulator_ctx::close_process_snapshot(const uint64_t handle) const {
+bool c_emulator_ctx::close_process_snapshot(const uint64_t handle) {
     return m_process_snapshots.erase(handle) != 0;
 }
 
@@ -711,7 +719,7 @@ uint64_t c_emulator_ctx::map_dummy_module(const std::vector<uint8_t> &image, con
     return image_base;
 }
 
-void c_emulator_ctx::stop(const uint64_t address) const {
+void c_emulator_ctx::stop(const uint64_t address) {
     m_stop_requested = true;
     m_hook_resume.reset();
 
@@ -719,45 +727,60 @@ void c_emulator_ctx::stop(const uint64_t address) const {
     uc_emu_stop(m_uc);
 }
 
-uc_err c_emulator_ctx::emulate(uint64_t start, const uint64_t end, const size_t count) const {
+void c_emulator_ctx::return_from_call(const uint32_t arg_count) {
+    const auto is_x86 = get_arch() == e_architecture::k_x86;
+    const auto sp_reg = is_x86 ? UC_X86_REG_ESP : UC_X86_REG_RSP;
+    const auto sp = get_x86_reg_value(sp_reg);
+    const auto address = is_x86 ? read<uint32_t>(sp).value() : read<uint64_t>(sp).value();
+
+    set_x86_reg_value(sp_reg, sp + (is_x86 ? 4ULL * (arg_count + 1ULL) : 8ULL));
+    set_pc(address);
+
+    m_hook_resume = address;
+
+    uc_emu_stop(m_uc);
+}
+
+uc_err c_emulator_ctx::emulate(uint64_t start, const uint64_t end, const size_t count) {
     if (!m_emulation_depth) {
         m_stop_requested = false;
     }
 
-    struct s_depth_guard {
-        size_t& depth;
-        explicit s_depth_guard(size_t& value) : depth(value) { ++depth; }
-        ~s_depth_guard() { --depth; }
-    } guard(m_emulation_depth);
-
-    for (;;) {
-        if (m_stop_requested) {
-            return UC_ERR_OK;
-        }
-
-        m_hook_resume.reset();
-
-        const auto err = uc_emu_start(m_uc, start, end, 0, count);
-
-        if (m_stop_requested) {
+    ++m_emulation_depth;
+    auto result = UC_ERR_OK;
+    try {
+        while (!m_stop_requested) {
             m_hook_resume.reset();
-            return err == UC_ERR_FETCH_PROT ? UC_ERR_OK : err;
-        }
+            result = uc_emu_start(m_uc, start, end, 0, count);
 
-        if (!m_hook_resume || (err != UC_ERR_OK && err != UC_ERR_FETCH_PROT)) {
-            return err;
-        }
+            if (m_stop_requested) {
+                m_hook_resume.reset();
+                if (result == UC_ERR_FETCH_PROT) {
+                    result = UC_ERR_OK;
+                }
+                break;
+            }
 
-        start = *m_hook_resume;
-        set_pc(start);
+            if (!m_hook_resume || (result != UC_ERR_OK && result != UC_ERR_FETCH_PROT)) {
+                break;
+            }
 
-        if (count == 1 || (end && start == end)) {
-            return UC_ERR_OK;
+            start = *m_hook_resume;
+            set_pc(start);
+            result = UC_ERR_OK;
+            if (count == 1 || (end && start == end)) {
+                break;
+            }
         }
+    } catch (...) {
+        --m_emulation_depth;
+        throw;
     }
+    --m_emulation_depth;
+    return result;
 }
 
-void c_emulator_ctx::single_step(std::function<mem_callback_t> on_mem) const {
+void c_emulator_ctx::single_step(std::function<mem_callback_t> on_mem) {
     uc_hook mem_trace;
 
     if (on_mem) {
@@ -780,7 +803,7 @@ void c_emulator_ctx::single_step(std::function<mem_callback_t> on_mem) const {
 }
 
 void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function<code_callback_t> on_code,
-    std::function<mem_callback_t> on_mem) const {
+    std::function<mem_callback_t> on_mem) {
     //
     uc_hook code_trace, mem_trace;
     auto err = UC_ERR_OK;
@@ -812,13 +835,15 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
 
     err = emulate(start, end, 0);
 
-    if (err != UC_ERR_OK /*&& err != UC_ERR_FETCH_PROT*/) {
+    if (err != UC_ERR_OK) {
         /*
-        printf("failed at 0x%llX , rsi - 0x%llX , rdi - 0x%llX , rax - 0x%llX , rbx - 0x%llX , r10 - 0x%llX, rbp - 0x%llX, r15 - 0x%llX, rcx - 0x%llX, r12 - 0x%llX\n",
+        printf("failed at 0x%llX , rsi - 0x%llX , rdi - 0x%llX , rax - 0x%llX , rbx - 0x%llX , r10 - 0x%llX, rbp - 0x%llX,"
+               " r15 - 0x%llX, rcx - 0x%llX, r12 - 0x%llX\n",
             get_pc(),
             get_x86_reg_value(UC_X86_REG_RSI), get_x86_reg_value(UC_X86_REG_RDI), get_x86_reg_value(UC_X86_REG_RAX),
             get_x86_reg_value(UC_X86_REG_RBX), get_x86_reg_value(UC_X86_REG_R10), get_x86_reg_value(UC_X86_REG_RBP),
             get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));*/
+
         throw std::runtime_error("emulation error: " + std::to_string(err));
     }
 
@@ -872,18 +897,23 @@ void c_emulator_ctx::set_pc(const uint64_t new_pc) const {
     }
 }
 
-uint64_t c_emulator_ctx::allocate_heap(const uint64_t size) const {
+uint64_t c_emulator_ctx::allocate_heap(const uint64_t size) {
     if (size > 0xFFFFF000ULL) {
         return 0;
     }
 
     const auto capacity = static_cast<uint32_t>(page_up(size ? size : 1, 0x1000));
     const auto address = allocate_storage(capacity, "heap");
-    m_heap_allocations.emplace(address, s_heap_allocation{static_cast<uint32_t>(size), capacity});
+
+    m_heap_allocations.emplace(address, s_heap_allocation{
+        .m_size = static_cast<uint32_t>(size),
+        .m_capacity = capacity,
+    });
+
     return address;
 }
 
-bool c_emulator_ctx::free_heap(const uint64_t address) const {
+bool c_emulator_ctx::free_heap(const uint64_t address) {
     if (!address) {
         return true;
     }
@@ -896,7 +926,7 @@ bool c_emulator_ctx::free_heap(const uint64_t address) const {
     return true;
 }
 
-uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t size, const uint32_t flags) const {
+uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t size, const uint32_t flags) {
     const auto entry = m_heap_allocations.find(address);
 
     if (entry == m_heap_allocations.end() || size > 0xFFFFF000ULL) {
@@ -942,11 +972,13 @@ uint64_t c_emulator_ctx::reallocate_heap(const uint64_t address, const uint64_t 
     return replacement;
 }
 
-uint64_t c_emulator_ctx::allocate_storage(const uint32_t size, const std::string &tag) const {
+uint64_t c_emulator_ctx::allocate_storage(const uint32_t size, const std::string &tag) {
     const auto region_base = m_memory_manager->allocate_helper_stub(size);
     const auto aligned_size = m_memory_manager->get_region_size(region_base);
 
-    if (const auto err = uc_mem_map(m_uc, region_base, aligned_size, UC_PROT_ALL); err != UC_ERR_OK) {
+    if (const auto err = uc_mem_map(m_uc, region_base, aligned_size, UC_PROT_ALL);
+        err != UC_ERR_OK) {
+        //
         m_memory_manager->free_region(region_base);
         throw std::runtime_error("emulator ctx: failed to allocate region: " + std::to_string(err));
     }
@@ -964,22 +996,24 @@ uint64_t c_emulator_ctx::allocate_storage(const uint32_t size, const std::string
     return region_base;
 }
 
-bool c_emulator_ctx::free_storage(const uint64_t address) const {
+bool c_emulator_ctx::free_storage(const uint64_t address) {
     if (!m_storage_allocations.contains(address)) {
         return false;
     }
 
-    const auto size = m_memory_manager->get_region_size(address);
-    if (!size || uc_mem_unmap(m_uc, address, size) != UC_ERR_OK) {
+    if (const auto size = m_memory_manager->get_region_size(address);
+        !size || uc_mem_unmap(m_uc, address, size) != UC_ERR_OK) {
+        //
         return false;
     }
 
     m_storage_allocations.erase(address);
+
     return m_memory_manager->free_region(address);
 }
 
-uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t size, const uint32_t type) const {
-    if (!size || size > 0xFFFFF000ULL || !(type & 0x3000) || (type & ~0x3000U)) {
+uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t size, const uint32_t type) {
+    if (!size || size > 0xFFFFF000ULL || !(type & 0x3000) || type & ~0x3000U) {
         return 0;
     }
 
@@ -987,6 +1021,7 @@ uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t
         const auto base = allocate_storage(static_cast<uint32_t>(size), "vm");
         const auto capacity = m_memory_manager->get_region_size(base);
         const bool committed = (type & 0x1000) != 0;
+
         if (!committed && uc_mem_unmap(m_uc, base, capacity) != UC_ERR_OK) {
             free_storage(base);
             return 0;
@@ -994,10 +1029,12 @@ uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t
 
         m_storage_allocations.erase(base);
         m_virtual_allocations.emplace(base, s_virtual_allocation{std::vector<bool>(capacity / 0x1000, committed)});
+
         return base;
     }
 
     auto entry = m_virtual_allocations.upper_bound(address);
+
     if (type != 0x1000 || entry == m_virtual_allocations.begin()) {
         return 0;
     }
@@ -1013,6 +1050,7 @@ uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t
 
     const auto first_page = offset / 0x1000;
     const auto last_page = page_up(offset + size, 0x1000) / 0x1000;
+
     std::vector<size_t> mapped_pages{};
 
     for (auto page = first_page; page < last_page; ++page) {
@@ -1025,6 +1063,7 @@ uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t
                 uc_mem_unmap(m_uc, entry->first + mapped_page * 0x1000, 0x1000);
                 entry->second.m_committed_pages[mapped_page] = false;
             }
+
             return 0;
         }
 
@@ -1035,7 +1074,7 @@ uint64_t c_emulator_ctx::allocate_virtual(const uint64_t address, const uint64_t
     return entry->first + first_page * 0x1000;
 }
 
-bool c_emulator_ctx::free_virtual(const uint64_t address, const uint64_t size, const uint32_t type) const {
+bool c_emulator_ctx::free_virtual(const uint64_t address, const uint64_t size, const uint32_t type) {
     auto entry = m_virtual_allocations.upper_bound(address);
 
     if (entry == m_virtual_allocations.begin() || (type != 0x8000 && type != 0x4000)) {
@@ -1047,19 +1086,20 @@ bool c_emulator_ctx::free_virtual(const uint64_t address, const uint64_t size, c
     const auto capacity = entry->second.m_committed_pages.size() * 0x1000;
     const auto offset = address - entry->first;
 
-    if (offset >= capacity || size > capacity - offset ||
-        (type == 0x8000 && (offset || size)) || (!size && offset)) {
+    if (offset >= capacity || size > capacity - offset || (type == 0x8000 && (offset || size)) || (!size && offset)) {
         return false;
     }
 
     const auto first_page = offset / 0x1000;
     const auto last_page = size ? page_up(offset + size, 0x1000) / 0x1000 : capacity / 0x1000;
+
     for (auto page = first_page; page < last_page; ++page) {
         if (!entry->second.m_committed_pages[page]) {
             continue;
         }
 
         const auto page_address = entry->first + page * 0x1000;
+
         if (uc_mem_unmap(m_uc, page_address, 0x1000) != UC_ERR_OK) {
             return false;
         }
