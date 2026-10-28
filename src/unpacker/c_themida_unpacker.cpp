@@ -198,45 +198,57 @@ void c_themida_unpacker::startup() {
 
     m_emulator_ctx->add_mem_hook(UC_HOOK_MEM_FETCH_PROT,
         [this](uc_engine*, uc_mem_type, const uint64_t address, int, int64_t) {
+            //
             if (m_emulator_ctx->get_hook(address)) {
                 return;
             }
 
-            on_first_vm_enter(address);
+            on_original_pe_callback(address);
             m_emulator_ctx->return_from_call(3);
         }, image_base, image_end - 1);
 
-    if (m_options.m_max_nested_vms > 0) {
-        while (true) {
-            pc = m_emulator_ctx->get_pc();
+    // catch emulation exceptions to prevent throwing after OEP is discovered cause
+    // stack corruption is possible after the OEP call (if OEP is non-returning for example,
+    // since we assume all OEPs return)
+    try {
+        if (m_options.m_max_nested_vms > 0) {
 
-            if (pc == return_address || m_emulator_ctx->is_stopped()) {
-                break;
-            }
+            while (true) {
+                pc = m_emulator_ctx->get_pc();
 
-            // if current RIP is not within the image, single step until a hook as fired or any other kind of magic happens
-            if (pc < image_base || pc >= image_end) {
-                m_emulator_ctx->single_step();
+                if (pc == return_address || m_emulator_ctx->is_stopped()) {
+                    break;
+                }
+
+                // if current RIP is not within the image, single step until a hook as fired or any other kind of magic happens
+                if (pc < image_base || pc >= image_end) {
+                    m_emulator_ctx->single_step();
+
+                    if (m_emulator_ctx->is_stopped() || m_emulator_ctx->get_pc() == return_address ||
+                        m_emulator_ctx->get_pc() == 0) {
+                        //
+                        break;
+                    }
+
+                    continue;
+                }
+
+                run_virtual_instruction(pc);
 
                 if (m_emulator_ctx->is_stopped() || m_emulator_ctx->get_pc() == return_address ||
                     m_emulator_ctx->get_pc() == 0) {
                     //
                     break;
                 }
-
-                continue;
             }
-
-            run_virtual_instruction(pc);
-
-            if (m_emulator_ctx->is_stopped() || m_emulator_ctx->get_pc() == return_address ||
-                m_emulator_ctx->get_pc() == 0) {
-                //
-                break;
-            }
+        } else {
+            m_emulator_ctx->run(pc, return_address);
         }
-    } else {
-        m_emulator_ctx->run(pc, return_address);
+    } catch (std::runtime_error &) {
+        // only throw if there are no OEP candidates
+        if (m_called_addresses.empty()) {
+            throw;
+        }
     }
 
     m_emulator_ctx->remove_mem_hook(image_base);
@@ -251,7 +263,6 @@ void c_themida_unpacker::startup() {
 
     m_real_entry_address = m_called_addresses.back();
     m_called_addresses.pop_back();
-    m_startup_completed = true;
 
     std::cout << "[unthemidator][runtime] OEP found - 0x" << std::hex << m_real_entry_address << std::dec << std::endl;
 
@@ -430,7 +441,7 @@ void c_themida_unpacker::on_region_made_writable(const uint64_t address, const u
     }, address, address + region_size - 1);
 }
 
-void c_themida_unpacker::on_first_vm_enter(const uint64_t address) {
+void c_themida_unpacker::on_original_pe_callback(const uint64_t address) {
     auto called_address = address;
 
     for (const auto &trampoline : m_vm_trampolines) {
@@ -915,12 +926,13 @@ bool c_themida_unpacker::recover_import(const uint64_t entry_address) {
             return false;
         }
 
-        // Run the stub until it reaches a known import, without executing the API hook.
+        // run the stub until it reaches a known import, without executing the API hook
         try {
             m_emulator_ctx->run(final_value, 0);
         } catch (...) {
             return false;
         }
+
         known_fn = m_emulator_ctx->get_imports()->find_import_by_address(m_emulator_ctx->get_pc());
     }
 

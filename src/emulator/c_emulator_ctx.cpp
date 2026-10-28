@@ -127,6 +127,7 @@ static bool dispatch_hook(uc_engine *uc, const uint64_t address, c_emulator_ctx*
 
     ctx->set_x86_reg_value(sp_reg, sp);
     ctx->set_pc(ret_addr);
+
     return true;
 }
 
@@ -835,12 +836,13 @@ void c_emulator_ctx::run(const uint64_t start, const uint64_t end, std::function
     err = emulate(start, end, 0);
 
     if (err != UC_ERR_OK) {
+        /*
         printf("failed at 0x%llX , rsi - 0x%llX , rdi - 0x%llX , rax - 0x%llX , rbx - 0x%llX , r10 - 0x%llX, rbp - 0x%llX,"
                " r15 - 0x%llX, rcx - 0x%llX, r12 - 0x%llX\n",
             get_pc(),
             get_x86_reg_value(UC_X86_REG_RSI), get_x86_reg_value(UC_X86_REG_RDI), get_x86_reg_value(UC_X86_REG_RAX),
             get_x86_reg_value(UC_X86_REG_RBX), get_x86_reg_value(UC_X86_REG_R10), get_x86_reg_value(UC_X86_REG_RBP),
-            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));
+            get_x86_reg_value(UC_X86_REG_R15), get_x86_reg_value(UC_X86_REG_RCX), get_x86_reg_value(UC_X86_REG_R12));*/
 
         throw std::runtime_error("emulation error: " + std::to_string(err));
     }

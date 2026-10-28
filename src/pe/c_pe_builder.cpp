@@ -4,7 +4,6 @@
 #include <limits>
 #include <stdexcept>
 #include <vector>
-#include <cstring>
 
 #include "pe_structs.hpp"
 #include "c_pe_image.hpp"
@@ -71,17 +70,23 @@ void c_pe_builder::set_tls_callbacks(const std::vector<uint64_t> &callbacks) {
 
 void c_pe_builder::build(const c_emulator_ctx& ctx) {
     auto mapped_image = m_memory_manager->get_mapped_image();
+
     // Locate the live resource entry using trusted headers, never the potentially
     // damaged DOS/NT/optional headers in Unicorn. Only this 8-byte entry is read.
     const auto &original = m_pe_image->get_mapped_image();
+
     const auto original_dos = read_at<s_dos_header>(original, 0);
     const auto original_optional = static_cast<size_t>(original_dos.e_lfanew) +
         sizeof(uint32_t) + sizeof(s_coff_header);
+
     const auto directories_offset = m_pe_image->is_x64() ? offsetof(s_optional_header_64, data_directory) :
         offsetof(s_optional_header_32, data_directory);
+
     const auto resource_offset = original_optional + directories_offset +
         k_directory_entry_resource * sizeof(s_data_directory);
+
     (void)read_at<s_data_directory>(original, resource_offset);
+
     const auto resource = ctx.read<s_data_directory>(m_pe_image->get_image_base() + resource_offset);
     if (!resource) {
         throw std::runtime_error("pe builder: failed to read live resource directory");

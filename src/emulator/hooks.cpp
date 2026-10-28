@@ -908,5 +908,5 @@ void hooks::dummy_true_function(const c_emulator_ctx *ctx) {
 void hooks::vm_enter(const c_emulator_ctx *ctx) {
     const auto vm_enter_address = ctx->get_pc();
 
-    ctx->get_themida_unpacker()->on_first_vm_enter(vm_enter_address);
+    ctx->get_themida_unpacker()->on_original_pe_callback(vm_enter_address);
 }
