@@ -84,6 +84,8 @@ Currently, the following variants are available:
 
 ### Research, documentation and useful links
 
+Devirtualize Themida / Code Virtualizer -virtualized code's CFG, see vmcalls as well as memory reads and writes: [Themida Explorer](https://tools.shablyko.com/themida/).
+
 Learn more about Themida obfuscation internals, including its virtual machines, in the following articles:
 
 1. [Devirtualizing Themida's (Code Virtualizer) FALCON VM to readable code](https://blog.shablyko.com/posts/themida-falcon-devirt/). Documentation of the Themida / CV research process, starting with no prior VM knowledge or complex tools.
